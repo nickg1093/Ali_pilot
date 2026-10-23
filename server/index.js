@@ -87,6 +87,7 @@ app.get('/api/positions', (_req,res) => {
     return {
       ...p,
       stale: now-p.receivedAt > STALE_AFTER_MS,
+      completed: (() => { const ss=tripStops(p.tripId); const last=ss.at(-1); const lm=gtfsMinutesServer(last?.arrival)||gtfsMinutesServer(last?.departure); if(lm==null)return false; const pp=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Rome',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(new Date()); const vv=k=>Number(pp.find(x=>x.type===k)?.value||0); let nm=vv('hour')*60+vv('minute')+vv('second')/60; let end=lm; while(nm-end>720)nm-=1440; while(end-nm>720)end-=1440; return nm>end+15; })(),
       routeColor: route.route_color || null,
       stops: tripStops(p.tripId),
       shape: gtfsTrip ? (shapeGroups.get(gtfsTrip.shape_id) || []) : []
