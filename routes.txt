@@ -1,4 +1,0 @@
-route_id,agency_id,route_short_name,route_long_name,route_desc,route_type,route_url,route_color,route_text_color
-B,ALILAGUNA,B,BLU,"Linea Blu collega Aeroporto Marco Polo a Murano, Lido, San Marco, Giudecca e Terminal Crociere con partenze ogni 30 minuti",4,http://www.alilaguna.it/linee/linea-blu,3F4B96,FFFFFF
-A,ALILAGUNA,A,ARANCIO,Linea Arancio collega Aeroporto Marco Polo alle fermate principali lungo il Canal Grande con partenze ogni 30 minuti,4,http://www.alilaguna.it/linee/linea-arancio,CF711D,FFFFFF
-R,ALILAGUNA,R,ROSSA,Linea Rossa collega Aeroporto Marco Polo a San Marco effettuando meno fermate rispetto a Linea Blu con partenze ogni ora,4,http://www.alilaguna.it/linee/linea-rossa,C12A22,FFFFFF
