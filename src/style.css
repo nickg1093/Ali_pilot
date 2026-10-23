@@ -74,3 +74,21 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .dashboard-grid .metric{min-height:128px}.dashboard-grid .metric-value{font-size:25px}.dashboard-grid .metric-value.small-value{font-size:18px}
 @media(max-width:900px){.theme-dark .metric-grid,.theme-light .metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:600px){.theme-dark .metric-grid,.theme-light .metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.dashboard-grid .metric{padding:10px}.dashboard-grid .metric-value{font-size:22px}.dashboard-grid .metric-value.small-value{font-size:16px}.topbar-actions{flex-wrap:wrap;justify-content:flex-end}.theme-toggle{font-size:9px;padding:7px 8px}.stop-row:not(:last-child)::after{left:18px;top:28px;bottom:-8px}.stop-index{width:23px;height:23px;flex-shrink:0}.stop-row{grid-template-columns:26px minmax(0,1fr);gap:8px}.stop-row .delay-chip{grid-column:2}}
+
+/* Marea attuale e quattro estremi ufficiali affiancati */
+.tide-overview-grid{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr);gap:10px;min-width:0;grid-column:span 2}
+.tide-overview-grid>.metric{height:100%;min-width:0}
+.tide-peaks-card .metric-label{margin-bottom:8px}
+.tide-peaks-list{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:0}
+.tide-peaks-list li{display:grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:center;gap:9px;padding:7px 0;border-bottom:1px solid #263646}
+.tide-peaks-list li:last-child{border-bottom:0}
+.peak-dot{width:7px;height:7px;border-radius:50%;background:#38bdf8}
+.peak-dot.massimo{background:#fb923c}.peak-dot.minimo{background:#38bdf8}
+.peak-info{display:flex;flex-direction:column;gap:2px;min-width:0}
+.peak-info strong{font-size:11px;color:#e3edf5}
+.peak-info small{font-size:9px;color:#8fa4b6;text-transform:capitalize}
+.peak-level{font-size:12px;font-variant-numeric:tabular-nums;color:#f2f7fb;white-space:nowrap}
+.peak-empty{padding:14px 0}
+.theme-light .tide-peaks-list li{border-bottom-color:#e3ebf0}.theme-light .peak-info strong{color:#17384a}.theme-light .peak-info small{color:#718694}.theme-light .peak-level{color:#17384a}
+@media(max-width:760px){.tide-overview-grid{grid-template-columns:minmax(0,.85fr) minmax(0,1.15fr);gap:7px}.tide-peaks-list li{gap:6px;padding:6px 0}.peak-info strong{font-size:10px}.peak-info small{font-size:8px}.peak-level{font-size:11px}}
+@media(max-width:420px){.tide-overview-grid{grid-template-columns:1fr}.tide-peaks-card{grid-column:auto}}
