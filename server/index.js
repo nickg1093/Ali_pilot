@@ -93,6 +93,36 @@ app.get('/api/positions', (_req,res) => {
     };
   }).sort((a,b)=>b.receivedAt-a.receivedAt));
 });
+// Posizioni simulate delle corse GTFS attualmente in servizio. Sono stime animate,
+// non posizioni reali: il client le sopprime quando esiste un GPS recente per la stessa corsa.
+app.get('/api/scheduled-vehicles', (_req,res) => {
+  const parts = new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Rome',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(new Date());
+  const val = k => Number(parts.find(p=>p.type===k)?.value||0);
+  const nowMin = val('hour')*60+val('minute')+val('second')/60;
+  const active=[];
+  for (const t of gtfs.trips) {
+    if (!serviceRunsToday(t.service_id)) continue;
+    const stops=tripStops(t.trip_id); if(stops.length<2) continue;
+    const timed=stops.map(s=>({...s,minute:gtfsMinutesServer(s.departure)||gtfsMinutesServer(s.arrival)}));
+    const first=timed[0].minute,last=timed[timed.length-1].minute;
+    if(first==null||last==null) continue;
+    let n=nowMin; while(n<first-720)n+=1440; while(n>last+720)n-=1440;
+    if(n<first||n>last) continue;
+    let i=0; while(i<timed.length-2 && timed[i+1].minute<n)i++;
+    const a=timed[i],b=timed[i+1]; if(a.minute==null||b.minute==null||b.minute<=a.minute)continue;
+    const shape=(shapeGroups.get(t.shape_id)||[]).map(p=>({lat:p.lat,lon:p.lon})); if(shape.length<2)continue;
+    const nearestIndex=stop=>{let best=0,dmin=Infinity;shape.forEach((p,j)=>{const d=(p.lat-stop.lat)**2+(p.lon-stop.lon)**2;if(d<dmin){dmin=d;best=j;}});return best;};
+    const ia=nearestIndex(a),ib=Math.max(ia+1,nearestIndex(b));
+    const f=Math.max(0,Math.min(1,(n-a.minute)/(b.minute-a.minute)));
+    const pointAt=(idx)=>shape[Math.min(shape.length-1,Math.max(0,idx))];
+    const raw=ia+(ib-ia)*f,lo=Math.floor(raw),hi=Math.min(shape.length-1,lo+1),q=raw-lo,p0=pointAt(lo),p1=pointAt(hi);
+    const route=routeById.get(t.route_id)||{};
+    active.push({deviceId:`scheduled:${t.trip_id}`,simulated:true,stale:false,tripId:t.trip_id,routeId:t.route_id,boatId:null,boatName:`Corsa ${t.trip_id}`,routeName:route.route_short_name||t.route_id,lat:p0.lat+(p1.lat-p0.lat)*q,lon:p0.lon+(p1.lon-p0.lon)*q,speedMps:null,delaySeconds:null,nextStopId:b.stopId,nextStopName:b.name,timestamp:Date.now(),routeColor:route.route_color||null,stops,shape});
+  }
+  res.set('Cache-Control','no-store');res.json(active);
+});
+function gtfsMinutesServer(s){if(!s||!/^\d{1,3}:\d{2}:\d{2}$/.test(s))return null;const [h,m,sec]=s.split(':').map(Number);return h*60+m+sec/60;}
+
 app.get('/api/gtfs-rt/vehicle-positions.pb', (_req,res) => {
   const now = Date.now();
   const entities = [...livePositions.values()].filter(p => now-p.receivedAt <= STALE_AFTER_MS).map(p => ({
