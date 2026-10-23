@@ -42,6 +42,10 @@ L'API legge il JSON ufficiale `livello.json`, filtra `Punta Salute Canal Grande`
 - `TIDE_CHECKPOINTS`: punti di controllo e soglie di marea in cm. Coordinate e soglie attuali sono segnaposto fittizi.
 - Non vengono inserite quote dei ponti: il prototipo confronta il livello misurato con soglie operative predefinite. Soglie reali devono provenire da fonti tecniche/autorizzate. Non usare le soglie dimostrative per prendere decisioni di navigazione.
 
+## ## GPS, associazione corsa e puntualità
+
+La dashboard segue il dispositivo con `watchPosition`, aggancia la posizione al punto più vicino del tracciato GTFS, mostra avanzamento percentuale, prossima fermata e allontanamento dal tracciato. Il ritardo/anticipo è una stima basata sull’interpolazione tra gli orari GTFS delle fermate vicine e la posizione lungo la shape; non è un feed di posizione reale della barca e la precisione dipende dal GPS, dal tracciato e dalla qualità degli orari.
+
 ## Note importanti
 
 - Il GPS segue la posizione, ma in questa versione non fa ancora map-matching del GPS sul tracciato e non stima l'orario d'arrivo al punto di controllo.
