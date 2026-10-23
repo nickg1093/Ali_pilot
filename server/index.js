@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import { parse } from 'csv-parse/sync';
+import GtfsRealtimeBindings from 'gtfs-realtime-bindings';
 import { BOATS, TIDE_CHECKPOINTS, TIDE_URLS } from './config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -46,6 +47,63 @@ function tripStops(tripId) {
     return { stopId: s.stop_id, name: stop.stop_name || s.stop_id, lat: Number(stop.stop_lat), lon: Number(stop.stop_lon), sequence: Number(s.stop_sequence), arrival: s.arrival_time, departure: s.departure_time };
   });
 }
+
+// Posizioni condivise fra i dispositivi collegati alla stessa istanza del server.
+// In memoria per il prototipo: per disponibilità persistente/multiistanza usare Redis o PostgreSQL.
+const livePositions = new Map();
+const STALE_AFTER_MS = 120_000;
+app.post('/api/positions', (req, res) => {
+  const b = req.body || {};
+  const required = ['deviceId','tripId','routeId','boatId','lat','lon'];
+  if (required.some(k => b[k] === undefined || b[k] === null || b[k] === '') || !Number.isFinite(Number(b.lat)) || !Number.isFinite(Number(b.lon))) {
+    return res.status(400).json({ error: 'Campi obbligatori mancanti o coordinate non valide.' });
+  }
+  if (Math.abs(Number(b.lat)) > 90 || Math.abs(Number(b.lon)) > 180) return res.status(400).json({ error: 'Coordinate fuori intervallo.' });
+  const now = Date.now();
+  const prev = livePositions.get(String(b.deviceId));
+  const item = {
+    deviceId: String(b.deviceId).slice(0,100), tripId: String(b.tripId), routeId: String(b.routeId), boatId: String(b.boatId),
+    boatName: String(b.boatName || b.boatId).slice(0,100), routeName: String(b.routeName || b.routeId).slice(0,100),
+    lat: Number(b.lat), lon: Number(b.lon), accuracy: Number.isFinite(Number(b.accuracy)) ? Number(b.accuracy) : null,
+    speedMps: Number.isFinite(Number(b.speedMps)) && Number(b.speedMps) >= 0 ? Number(b.speedMps) : null,
+    bearing: Number.isFinite(Number(b.bearing)) ? Number(b.bearing) : null,
+    progress: Number.isFinite(Number(b.progress)) ? Math.max(0,Math.min(1,Number(b.progress))) : null,
+    delaySeconds: Number.isFinite(Number(b.delaySeconds)) ? Math.round(Number(b.delaySeconds)) : null,
+    nextStopId: b.nextStopId ? String(b.nextStopId) : null, nextStopName: b.nextStopName ? String(b.nextStopName).slice(0,160) : null,
+    timestamp: Number.isFinite(Number(b.timestamp)) ? Number(b.timestamp) : now, receivedAt: now
+  };
+  // Scarta update più vecchi rispetto alla posizione già memorizzata.
+  if (prev && item.timestamp < prev.timestamp) return res.status(409).json({ error: 'Aggiornamento GPS più vecchio di quello già ricevuto.' });
+  livePositions.set(item.deviceId, item);
+  res.json({ ok: true, activeDevices: [...livePositions.values()].filter(x => now - x.receivedAt <= STALE_AFTER_MS).length });
+});
+app.get('/api/positions', (_req,res) => {
+  const now = Date.now();
+  res.json([...livePositions.values()].map(p => ({ ...p, stale: now-p.receivedAt > STALE_AFTER_MS })).sort((a,b)=>b.receivedAt-a.receivedAt));
+});
+app.get('/api/gtfs-rt/vehicle-positions.pb', (_req,res) => {
+  const now = Date.now();
+  const entities = [...livePositions.values()].filter(p => now-p.receivedAt <= STALE_AFTER_MS).map(p => ({
+    id: p.deviceId,
+    vehicle: {
+      trip: { tripId: p.tripId, routeId: p.routeId },
+      vehicle: { id: p.deviceId, label: p.boatName },
+      position: { latitude: p.lat, longitude: p.lon, ...(p.bearing !== null ? { bearing: p.bearing } : {}), ...(p.speedMps !== null ? { speed: p.speedMps } : {}) },
+      timestamp: Math.floor(p.timestamp/1000), currentStatus: 2,
+      ...(p.nextStopId ? { stopId: p.nextStopId } : {})
+    }
+  }));
+  const feed = { header: { gtfsRealtimeVersion: '2.0', incrementality: 0, timestamp: Math.floor(now/1000) }, entity: entities };
+  const bytes = GtfsRealtimeBindings.transit_realtime.FeedMessage.encode(feed).finish();
+  res.set('Content-Type','application/x-protobuf');
+  res.set('Cache-Control','no-store');
+  res.send(Buffer.from(bytes));
+});
+app.get('/api/gtfs-rt/vehicle-positions.json', (_req,res) => {
+  const now = Date.now();
+  res.json({ header:{gtfsRealtimeVersion:'2.0',timestamp:Math.floor(now/1000)}, vehicles:[...livePositions.values()].filter(p=>now-p.receivedAt<=STALE_AFTER_MS) });
+});
+
 app.get('/api/health', (_req,res) => res.json({ ok: true, app: 'alilaguna-pilot', gtfsLoaded: gtfs.trips.length > 0 }));
 app.get('/api/boats', (_req,res) => res.json(BOATS));
 app.get('/api/routes', (_req,res) => res.json(gtfs.routes.map(r => ({ id:r.route_id, shortName:r.route_short_name, name:r.route_long_name, description:r.route_desc, color:r.route_color, textColor:r.route_text_color }))));
