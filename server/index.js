@@ -79,7 +79,19 @@ app.post('/api/positions', (req, res) => {
 });
 app.get('/api/positions', (_req,res) => {
   const now = Date.now();
-  res.json([...livePositions.values()].map(p => ({ ...p, stale: now-p.receivedAt > STALE_AFTER_MS })).sort((a,b)=>b.receivedAt-a.receivedAt));
+  // Arricchisce le posizioni con il percorso GTFS e gli orari della corsa,
+  // così la flotta live può mostrare tracciato e rail senza richieste extra.
+  res.json([...livePositions.values()].map(p => {
+    const gtfsTrip = gtfs.trips.find(t => t.trip_id === p.tripId);
+    const route = routeById.get(p.routeId) || {};
+    return {
+      ...p,
+      stale: now-p.receivedAt > STALE_AFTER_MS,
+      routeColor: route.route_color || null,
+      stops: tripStops(p.tripId),
+      shape: gtfsTrip ? (shapeGroups.get(gtfsTrip.shape_id) || []) : []
+    };
+  }).sort((a,b)=>b.receivedAt-a.receivedAt));
 });
 app.get('/api/gtfs-rt/vehicle-positions.pb', (_req,res) => {
   const now = Date.now();
