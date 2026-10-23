@@ -1,54 +1,39 @@
-# Alilaguna Pilot — PWA starter
+# Alilaguna Pilot
 
-Prototipo installabile per dashboard di navigazione, basato sul GTFS statico Alilaguna e sui dati Open Data CPSM del Comune di Venezia.
+PWA sperimentale per selezione corsa, navigazione GPS, rail delle fermate, marea di Punta Salute e condivisione delle posizioni GPS fra dispositivi collegati alla stessa istanza server.
 
 ## Avvio locale
 
-```bash
-npm install
-npm run dev
-```
+- Node.js 20 o successivo consigliato.
+- `npm install`
+- `npm run dev` per sviluppo
+- `npm run build` e `npm start` per avvio produzione
 
-Vite mostra l'indirizzo del frontend (normalmente `http://localhost:5173`). L'API viene avviata sulla porta `10000` in sviluppo; per comodità configura un proxy Vite aggiungendo `server.proxy` se necessario, oppure avvia il build e usa `npm start`.
+## Render
 
-Per testare la versione completa in locale:
+Il repository include `render.yaml`. Come alternativa, configurare Build Command `npm install && npm run build` e Start Command `npm start`. Il GPS richiede HTTPS e il consenso del browser.
 
-```bash
-npm install
-npm run build
-npm start
-```
+## GTFS Realtime
 
-Apri `http://localhost:10000`.
+- `GET /api/gtfs-rt/vehicle-positions.pb`: feed GTFS Realtime protobuf VehiclePositions.
+- `GET /api/gtfs-rt/vehicle-positions.json`: rappresentazione JSON di debug.
+- `GET /api/positions`: posizioni recenti per la dashboard flotta.
+- `POST /api/positions`: riceve aggiornamenti GPS da ogni dispositivo.
 
-## Deploy su GitHub + Render
+Il feed protobuf è generato al volo dal backend e non va committato come file statico. Il dispositivo invia aggiornamenti ogni circa 4 secondi mentre il GPS è attivo. Le posizioni più vecchie di 2 minuti sono escluse dal feed GTFS-RT.
 
-1. Carica tutti i file di questa cartella in un repository GitHub.
-2. In Render scegli **New + → Web Service** e collega il repository.
-3. Render può usare `render.yaml`; altrimenti imposta Build Command `npm install && npm run build` e Start Command `npm start`.
-4. Dopo il deploy apri l'URL HTTPS da smartphone. Per installare la PWA usa il menu del browser; la geolocalizzazione richiede HTTPS e consenso.
+## Limite del prototipo multi-dispositivo
 
-## Dati GTFS
+Le posizioni sono conservate in memoria nel processo Node. Sono quindi condivise dai dispositivi che raggiungono la stessa istanza, ma si perdono al riavvio e non sono condivise tra più istanze Render. Per uso continuativo occorre collegare Redis o PostgreSQL e proteggere gli endpoint con autenticazione/token per dispositivo.
 
-Il GTFS caricato è incluso in `data/gtfs/`. Aggiornare questi file quando si riceve un nuovo feed. L'API filtra i servizi in base a `calendar.txt`; il feed allegato non contiene `calendar_dates.txt`, quindi le eccezioni speciali di calendario non sono gestite.
+## Personalizzare barche e soglie
+
+Modificare `server/config.js`. I dati dimostrativi sono segnaposto e non devono essere usati per decisioni di navigazione reali.
 
 ## Marea
 
-L'API legge il JSON ufficiale `livello.json`, filtra `Punta Salute Canal Grande` e restituisce il valore in cm. Fonte: [Comune di Venezia — stazione Punta Salute](https://www.comune.venezia.it/it/content/1-punta-salute-canal-grande) e [Open Data CPSM](https://dati.venezia.it/?q=content/cpsm-dati-meteomarini-laguna-e-litorale-veneziano). Il dato osservato è grezzo, riferito a ZMPS e indicato in ora solare UTC+1 dalla fonte; l'app mostra l'orario così come pubblicato. Il route `/api/tide-forecast` espone per ora il JSON grezzo della previsione: la sua struttura va normalizzata prima di presentarla come previsione utilizzabile.
+Il backend recupera il dataset del Comune di Venezia. L'orario della fonte, pubblicato in ora solare fissa UTC+1, viene convertito in un istante e mostrato in `Europe/Rome`, con gestione automatica CET/CEST. Il dato può essere grezzo/non validato: verificare sempre la fonte ufficiale.
 
-## Personalizzazione — MODIFICARE `server/config.js`
+## Stima ritardo
 
-- `BOATS`: nomi delle barche e soglia massima di marea in cm.
-- `TIDE_CHECKPOINTS`: punti di controllo e soglie di marea in cm. Coordinate e soglie attuali sono segnaposto fittizi.
-- Non vengono inserite quote dei ponti: il prototipo confronta il livello misurato con soglie operative predefinite. Soglie reali devono provenire da fonti tecniche/autorizzate. Non usare le soglie dimostrative per prendere decisioni di navigazione.
-
-## ## GPS, associazione corsa e puntualità
-
-La dashboard segue il dispositivo con `watchPosition`, aggancia la posizione al punto più vicino del tracciato GTFS, mostra avanzamento percentuale, prossima fermata e allontanamento dal tracciato. Il ritardo/anticipo è una stima basata sull’interpolazione tra gli orari GTFS delle fermate vicine e la posizione lungo la shape; non è un feed di posizione reale della barca e la precisione dipende dal GPS, dal tracciato e dalla qualità degli orari.
-
-## Note importanti
-
-- Il GPS segue la posizione, ma in questa versione non fa ancora map-matching del GPS sul tracciato e non stima l'orario d'arrivo al punto di controllo.
-- Gli orari GTFS sono orari pianificati, non dati live.
-- La marea osservata a Punta Salute può non rappresentare perfettamente il livello locale di ogni canale. Il sistema è informativo e non sostituisce le prescrizioni del gestore o le valutazioni del comandante.
-- Dati CPSM pubblicati con licenza CC-BY: riportare la fonte e la licenza nelle versioni distribuite.
+Il ritardo è una stima ottenuta interpolando gli orari statici GTFS lungo la forma del percorso e confrontandoli con l'ora locale. Non è un'informazione ufficiale di esercizio; dipende dalla qualità del GPS e dall'associazione corretta della corsa.
