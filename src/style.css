@@ -3,3 +3,16 @@
 
 .stop-next { background: #eff6ff; border-left: 4px solid #0284c7; }
 .stop-passed { opacity: .58; }
+
+/* Navigazione a pagine e rail della corsa */
+.nav-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:14px 0;flex-wrap:wrap}
+.nav-toolbar a{font-size:.9rem;font-weight:700;color:#0369a1;text-decoration:none}
+.controls{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;align-items:end}
+.controls .section-heading,.controls>.primary-button{grid-column:1/-1}
+.controls .section-heading{margin-bottom:0}
+.controls .field{display:flex;flex-direction:column;gap:7px;min-width:0}
+.controls .field label{font-weight:700;font-size:.88rem}
+.controls .field select{width:100%;min-width:0;border:1px solid #cbd5e1;border-radius:10px;background:white;padding:12px;color:#0f172a}
+.controls .field small{color:#64748b;font-size:.78rem}
+button:disabled{opacity:.5;cursor:not-allowed}
+@media(max-width:720px){.controls{grid-template-columns:1fr}.controls .section-heading,.controls>.primary-button{grid-column:auto}}
