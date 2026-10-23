@@ -184,26 +184,53 @@ app.get('/api/tide', async (_req,res) => {
   }
 });
 app.get('/api/tide-forecast', async (_req,res) => {
-  // La pagina ACTV riprende in formato testuale gli estremali comunicati dal Centro Maree,
-  // cioè il messaggio sintetico della segreteria: ora, quota e direzione (up/down).
-  const source = 'https://actv.avmspa.it/it/content/acqua-alta-servizi-di-navigazione-previsti';
+  // Testo ufficiale della segreteria del Centro Maree: estremi previsti per data, ora e quota.
+  const source = 'https://www.comune.venezia.it/sites/default/files/publicCPSM/segretel/testoSegreteria.txt';
   try {
     const response = await fetch(source, { headers: { 'User-Agent': 'Mozilla/5.0 AlilagunaPilot/1.0' }, signal: AbortSignal.timeout(12000) });
-    if (!response.ok) throw new Error(`Pagina ACTV HTTP ${response.status}`);
-    const html = await response.text();
-    const plain = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ').replace(/&amp;/gi, '&').replace(/&ndash;|&#8211;/gi, '–').replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/\s+/g, ' ');
-    const issued = plain.match(/Previsione di marea effettuata alle ore\s+(\d{1,2}:\d{2})\s+del\s+(\d{1,2})\/(\d{1,2})\/(\d{4})/i);
-    const current = plain.match(/Livello attuale\s+(-?\d+(?:[.,]\d+)?)\s*cm/i);
-    const rx = /(?:^|\s)(\d{1,2}:\d{2})\s+(-?\d+(?:[.,]\d+)?)\s*cm\s+(up|down|crescente|calante)(?=\s|$)/gi;
-    const extrema = []; let m;
-    while ((m = rx.exec(plain)) !== null) extrema.push({ time: m[1], levelCm: Number(m[2].replace(',', '.')), trend: /up|crescente/i.test(m[3]) ? 'up' : 'down' });
-    let issuedAt = null;
-    if (issued) { const [, hhmm, dd, mm, yyyy] = issued; issuedAt = new Date(Number(yyyy), Number(mm)-1, Number(dd), Number(hhmm.split(':')[0]), Number(hhmm.split(':')[1])); }
-    const base = issuedAt || new Date();
-    const peaks = extrema.map(x => { const [h,mi] = x.time.split(':').map(Number); const at = new Date(base.getFullYear(), base.getMonth(), base.getDate(), h, mi); if (at <= base) at.setDate(at.getDate()+1); return { ...x, at: at.toISOString(), type: x.trend === 'up' ? 'Massimo' : 'Minimo' }; }).sort((a,b) => new Date(a.at)-new Date(b.at));
-    const nextPeak = peaks[0] || null;
-    if (!nextPeak) throw new Error('La pagina ACTV è stata raggiunta, ma non contiene estremali nel formato atteso');
-    res.json({ source, retrievedAt: new Date().toISOString(), issuedAt: issuedAt?.toISOString() || null, currentLevelCm: current ? Number(current[1].replace(',', '.')) : null, peaks, nextPeak, method: 'Estremali testuali pubblicati da ACTV sulla base delle previsioni del Centro Maree; orari interpretati nel fuso Europe/Rome.' });
+    if (!response.ok) throw new Error(`Centro Maree HTTP ${response.status}`);
+    const plain = (await response.text()).replace(/^\uFEFF/, '').replace(/\r/g, '');
+    const issue = plain.match(/Previsione\s+delle\s+ore\s+(\d{1,2}:\d{2})\s+del\s+giorno\s+(\d{1,2})\s+([a-zàèéìòù]+)/i);
+    const months = { gennaio:0, febbraio:1, marzo:2, aprile:3, maggio:4, giugno:5, luglio:6, agosto:7, settembre:8, ottobre:9, novembre:10, dicembre:11 };
+    const now = new Date();
+    const romeParts = new Intl.DateTimeFormat('en-GB', { timeZone:'Europe/Rome', year:'numeric', month:'numeric', day:'numeric', hour:'numeric', minute:'numeric', hourCycle:'h23' }).formatToParts(now).reduce((o,p)=>(o[p.type]=Number(p.value)||p.value,o),{});
+    const nowRome = new Date(romeParts.year, romeParts.month-1, romeParts.day, romeParts.hour, romeParts.minute);
+    function romeDate(y, mo, d, h, mi) {
+      // Interpreta l'ora locale Europe/Rome e restituisce un istante UTC corretto anche con ora legale.
+      const target = Date.UTC(y,mo,d,h,mi);
+      let guess = target;
+      for (let i=0;i<3;i++) {
+        const parts = new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Rome',year:'numeric',month:'numeric',day:'numeric',hour:'numeric',minute:'numeric',hourCycle:'h23'}).formatToParts(new Date(guess)).reduce((o,p)=>(o[p.type]=Number(p.value),o),{});
+        const represented = Date.UTC(parts.year,parts.month-1,parts.day,parts.hour,parts.minute);
+        guess += target-represented;
+      }
+      return new Date(guess);
+    }
+    let baseYear = romeParts.year;
+    if (issue) {
+      const mo = months[issue[3].toLocaleLowerCase('it')];
+      if (mo !== undefined && mo < romeParts.month-1 && romeParts.month===1) baseYear--;
+    }
+    const extrema = [];
+    let currentDay = null, currentMonth = null;
+    for (const line of plain.split('\n')) {
+      const dateMatch = line.match(/^\s*(\d{1,2})\s+([a-zàèéìòù]+)\s*$/i);
+      if (dateMatch && months[dateMatch[2].toLocaleLowerCase('it')] !== undefined) {
+        currentDay = Number(dateMatch[1]); currentMonth = months[dateMatch[2].toLocaleLowerCase('it')]; continue;
+      }
+      const peakMatch = line.match(/^\s*ore\s+(\d{1,2}:\d{2}),\s*(minimo|massimo),\s*(-?\d+(?:[.,]\d+)?)\s*cm\.?\s*$/i);
+      if (peakMatch && currentDay !== null && currentMonth !== null) {
+        let y = baseYear;
+        // Gestisce l'elenco a cavallo tra dicembre e gennaio.
+        if (currentMonth===0 && romeParts.month===12) y++;
+        const [h,mi] = peakMatch[1].split(':').map(Number);
+        extrema.push({ at:romeDate(y,currentMonth,currentDay,h,mi).toISOString(), time:peakMatch[1], type:peakMatch[2][0].toUpperCase()+peakMatch[2].slice(1).toLowerCase(), levelCm:Number(peakMatch[3].replace(',','.')) });
+      }
+    }
+    const peaks = extrema.filter(p=>new Date(p.at)>now).sort((a,b)=>new Date(a.at)-new Date(b.at)).slice(0,4);
+    if (!peaks.length) throw new Error('Il testo ufficiale non contiene estremi futuri riconoscibili.');
+    const issuedAt = issue ? (()=>{ const mo=months[issue[3].toLocaleLowerCase('it')]; return mo===undefined?null:romeDate(baseYear,mo,Number(issue[2]),...issue[1].split(':').map(Number)).toISOString(); })() : null;
+    res.json({ source, retrievedAt:new Date().toISOString(), issuedAt, peaks, nextPeak:peaks[0], method:'Quattro estremi futuri estratti dal testo ufficiale del Centro Maree; orari Europe/Rome.' });
   } catch (e) {
     res.status(502).json({ error:'Previsione marea non disponibile.', detail:e.message, source });
   }
