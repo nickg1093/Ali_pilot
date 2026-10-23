@@ -1,4 +1,4 @@
-# Laguna Pilot — PWA starter
+# Alilaguna Pilot — PWA starter
 
 Prototipo installabile per dashboard di navigazione, basato sul GTFS statico Alilaguna e sui dati Open Data CPSM del Comune di Venezia.
 
