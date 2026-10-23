@@ -32,9 +32,11 @@ for (const p of gtfs.shapes) {
 for (const pts of shapeGroups.values()) pts.sort((a,b) => a.seq-b.seq);
 
 function serviceRunsToday(serviceId) {
-  const now = new Date();
-  const date = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}`;
-  const weekday = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'][now.getDay()];
+  // Il calendario GTFS va valutato nel fuso locale del servizio (Venezia), non nel fuso UTC del server Render.
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Rome', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'long' }).formatToParts(new Date());
+  const part = key => parts.find(p => p.type === key)?.value;
+  const date = `${part('year')}${part('month')}${part('day')}`;
+  const weekday = part('weekday').toLowerCase();
   const cal = gtfs.calendar.find(c => c.service_id === serviceId);
   return !cal || (date >= cal.start_date && date <= cal.end_date && cal[weekday] === '1');
 }
@@ -44,7 +46,7 @@ function tripStops(tripId) {
     return { stopId: s.stop_id, name: stop.stop_name || s.stop_id, lat: Number(stop.stop_lat), lon: Number(stop.stop_lon), sequence: Number(s.stop_sequence), arrival: s.arrival_time, departure: s.departure_time };
   });
 }
-app.get('/api/health', (_req,res) => res.json({ ok: true, app: 'laguna-pilot', gtfsLoaded: gtfs.trips.length > 0 }));
+app.get('/api/health', (_req,res) => res.json({ ok: true, app: 'alilaguna-pilot', gtfsLoaded: gtfs.trips.length > 0 }));
 app.get('/api/boats', (_req,res) => res.json(BOATS));
 app.get('/api/routes', (_req,res) => res.json(gtfs.routes.map(r => ({ id:r.route_id, shortName:r.route_short_name, name:r.route_long_name, description:r.route_desc, color:r.route_color, textColor:r.route_text_color }))));
 app.get('/api/trips', (req,res) => {
@@ -69,6 +71,33 @@ async function fetchJson(url) {
   if (!response.ok) throw new Error(`Fonte marea HTTP ${response.status}`);
   return response.json();
 }
+// Il Comune pubblica l'orario come ora solare fissa UTC+1 tutto l'anno.
+// Convertiamo quel wall-clock in un istante assoluto, poi il frontend lo visualizza in Europe/Rome (CET/CEST).
+function comuneTimestampToIso(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  // ISO con Z/offset: è già un istante assoluto.
+  if (/(Z|[+-]\d{2}:?\d{2})$/i.test(raw)) {
+    const d = new Date(raw); return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  // Formati comuni: YYYY-MM-DD HH:mm[:ss] o YYYY-MM-DDTHH:mm[:ss]
+  let m = raw.match(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (m) {
+    const [, y, mo, day, h, mi, sec='0'] = m;
+    // Sottrae l'offset fisso +01:00 della fonte.
+    const d = new Date(Date.UTC(+y, +mo-1, +day, +h-1, +mi, +sec));
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  // Formato italiano: DD/MM/YYYY HH:mm[:ss]
+  m = raw.match(/(\d{1,2})[/-](\d{1,2})[/-](\d{4})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (m) {
+    const [, day, mo, y, h, mi, sec='0'] = m;
+    const d = new Date(Date.UTC(+y, +mo-1, +day, +h-1, +mi, +sec));
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  return null;
+}
+
 app.get('/api/tide', async (_req,res) => {
   try {
     const data = await fetchJson(TIDE_URLS.observed);
@@ -77,8 +106,9 @@ app.get('/api/tide', async (_req,res) => {
     const valueRaw = row.valore ?? row.value ?? row.livello;
     const meters = parseNumber(valueRaw);
     if (!Number.isFinite(meters) || meters <= -900) throw new Error('Valore di marea mancante/non valido');
-    const observedAt = row.data || row.timestamp || row.datetime || null;
-    res.json({ station: row.stazione || 'Punta Salute Canal Grande', levelMeters: meters, levelCm: Math.round(meters*100), observedAt, retrievedAt: new Date().toISOString(), source: TIDE_URLS.observed, units: 'm', reference: 'ZMPS', disclaimer: 'Dato automatico grezzo del Comune; non validato. Verificare sempre la fonte ufficiale.' });
+    const observedAtRaw = row.data || row.timestamp || row.datetime || null;
+    const observedAt = comuneTimestampToIso(observedAtRaw);
+    res.json({ station: row.stazione || 'Punta Salute Canal Grande', levelMeters: meters, levelCm: Math.round(meters*100), observedAt, observedAtRaw, retrievedAt: new Date().toISOString(), source: TIDE_URLS.observed, units: 'm', reference: 'ZMPS', disclaimer: 'Dato automatico grezzo del Comune; non validato. Verificare sempre la fonte ufficiale.' });
   } catch (e) {
     res.status(502).json({ error: 'Impossibile leggere la marea ufficiale in questo momento.', detail: e.message, source: TIDE_URLS.observed });
   }
@@ -96,6 +126,6 @@ if (fs.existsSync(dist)) {
   app.use(express.static(dist));
   app.get('*', (req,res,next) => req.path.startsWith('/api/') ? next() : res.sendFile(path.join(dist, 'index.html')));
 } else {
-  app.get('/', (_req,res) => res.type('text').send('Laguna Pilot API attiva. Avvia il frontend con npm run dev oppure esegui npm run build.'));
+  app.get('/', (_req,res) => res.type('text').send('Alilaguna Pilot API attiva. Avvia il frontend con npm run dev oppure esegui npm run build.'));
 }
-app.listen(port, () => console.log(`Laguna Pilot in ascolto sulla porta ${port}`));
+app.listen(port, () => console.log(`Alilaguna Pilot in ascolto sulla porta ${port}`));
