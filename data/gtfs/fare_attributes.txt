@@ -1,0 +1,4 @@
+fare_id,price,currency_type,payment_method,transfers,agency_id
+F1,18,EUR,1,0,ALILAGUNA
+F2,10,EUR,1,0,ALILAGUNA
+F3,18,EUR,1,0,ALILAGUNA
