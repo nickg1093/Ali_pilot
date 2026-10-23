@@ -37,3 +37,11 @@ Il backend recupera il dataset del Comune di Venezia. L'orario della fonte, pubb
 ## Stima ritardo
 
 Il ritardo è una stima ottenuta interpolando gli orari statici GTFS lungo la forma del percorso e confrontandoli con l'ora locale. Non è un'informazione ufficiale di esercizio; dipende dalla qualità del GPS e dall'associazione corretta della corsa.
+
+## Aggiornamenti interfaccia flotta e rail
+
+- La velocità è mostrata in km/h (conversione da m/s restituiti dal GPS).
+- La rail mostra l'orario programmato e una stima aggiornata tramite il ritardo stimato corrente; quando il GPS registra una sosta ravvicinata al pontile a velocità molto bassa, memorizza l'ora di rilevamento per la sessione corrente.
+- La prossima fermata considera il punto GTFS più vicino e la velocità GPS per segnalare una fermata quando il dispositivo è entro circa 35 m e sotto 3,2 km/h. I parametri sono euristiche da calibrare sul campo.
+- La pagina Flotta live include una mappa Leaflet con simboli selezionabili e una scheda dettagliata per ciascun dispositivo.
+- Le ore visualizzate nella rail sono orari locali Europe/Rome. Le stime non sostituiscono dati ufficiali di esercizio.
