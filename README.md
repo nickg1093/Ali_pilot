@@ -54,3 +54,14 @@ Il ritardo è una stima ottenuta interpolando gli orari statici GTFS lungo la fo
 - Il dettaglio include la corsa e la successione delle fermate con orario programmato, orario stimato e anticipo/ritardo.
 - Le differenze di puntualità sono mostrate anche quando valgono un solo minuto.
 - Gli orari stimati del dettaglio flotta applicano la differenza attuale rispetto al GTFS a tutte le fermate della corsa: sono quindi stime indicative, non previsioni dinamiche validate per ogni singola fermata.
+
+
+## Installare su smartphone (PWA)
+
+Alilaguna Pilot è una web app installabile, non un APK Android o un pacchetto IPA per iOS. Non serve uno store: dopo il deploy su un indirizzo HTTPS, aprire il sito sul dispositivo.
+
+- **Android (Chrome):** usare il pulsante `Installa app` nell'intestazione se disponibile, oppure menu ⋮ → `Installa app` / `Aggiungi a schermata Home`.
+- **iPhone/iPad (Safari):** aprire l'indirizzo in Safari → `Condividi` → `Aggiungi alla schermata Home` → `Aggiungi`. Su iOS il pulsante di installazione del browser non è esposto come su Android, quindi sono mostrate istruzioni manuali.
+- **Desktop compatibili:** il browser può offrire l'icona di installazione nella barra degli indirizzi.
+
+Il progetto include manifest PWA, service worker generato da `vite-plugin-pwa`, icone PNG 192/512 e `apple-touch-icon`. La geolocalizzazione richiede HTTPS e permesso esplicito. Alcune funzioni, in particolare GPS continuo e trasmissione alla flotta, richiedono che l'app resti aperta e che il sistema operativo non sospenda il browser.
