@@ -45,3 +45,12 @@ Il ritardo è una stima ottenuta interpolando gli orari statici GTFS lungo la fo
 - La prossima fermata considera il punto GTFS più vicino e la velocità GPS per segnalare una fermata quando il dispositivo è entro circa 35 m e sotto 3,2 km/h. I parametri sono euristiche da calibrare sul campo.
 - La pagina Flotta live include una mappa Leaflet con simboli selezionabili e una scheda dettagliata per ciascun dispositivo.
 - Le ore visualizzate nella rail sono orari locali Europe/Rome. Le stime non sostituiscono dati ufficiali di esercizio.
+
+## Aggiornamenti interfaccia flotta
+
+- Layout più compatto, ottimizzato per schermi mobili.
+- Nella flotta live non vengono mostrate coordinate, accuratezza GPS o percentuale di avanzamento.
+- La mappa disegna anche il tracciato GTFS associato a ogni dispositivo; cliccando sul mezzo o sul tracciato si apre il dettaglio.
+- Il dettaglio include la corsa e la successione delle fermate con orario programmato, orario stimato e anticipo/ritardo.
+- Le differenze di puntualità sono mostrate anche quando valgono un solo minuto.
+- Gli orari stimati del dettaglio flotta applicano la differenza attuale rispetto al GTFS a tutte le fermate della corsa: sono quindi stime indicative, non previsioni dinamiche validate per ogni singola fermata.
