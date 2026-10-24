@@ -23,7 +23,6 @@ export const TIDE_CHECKPOINTS = [
 
 // Fonte ufficiale Comune di Venezia / Open Data CPSM.
 export const TIDE_URLS = {
-  observed: 'https://www.comune.venezia.it/it/content/centro-previsioni-e-segnalazioni-maree-beta',
-  forecast: 'https://dati.venezia.it/sites/default/files/dataset/opendata/previsione.json',
-  observedFallback: 'https://dati.venezia.it/sites/default/files/dataset/opendata/livello.json'
+  observed: 'https://dati.venezia.it/sites/default/files/dataset/opendata/livello.json',
+  forecast: 'https://dati.venezia.it/sites/default/files/dataset/opendata/previsione.json'
 };

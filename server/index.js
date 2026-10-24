@@ -3,7 +3,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import { parse } from 'csv-parse/sync';
-import GtfsRealtimeBindings from 'gtfs-realtime-bindings';
 import { BOATS, TIDE_CHECKPOINTS, TIDE_URLS } from './config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -11,13 +10,6 @@ const root = path.resolve(__dirname, '..');
 const app = express();
 const port = process.env.PORT || 10000;
 app.disable('x-powered-by');
-// API dinamiche: non consentire cache intermedie/browser, soprattutto per la marea.
-app.use('/api', (_req, res, next) => {
-  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-  res.set('Pragma', 'no-cache');
-  res.set('Expires', '0');
-  next();
-});
 app.use(express.json());
 
 function readCsv(name) {
@@ -55,59 +47,10 @@ function tripStops(tripId) {
   });
 }
 
-// Archivio realtime su file JSON: leggibile anche fuori dal processo server.
-// Su Render il filesystem è persistente solo se REALTIME_DATA_DIR punta a un disco persistente.
-const realtimeDir = path.resolve(process.env.REALTIME_DATA_DIR || path.join(root, 'data', 'realtime'));
-const vehiclePositionsFile = path.join(realtimeDir, 'vehicle-positions.json');
-const tripUpdatesFile = path.join(realtimeDir, 'trip-updates.json');
-const vehiclePositionsPbFile = path.join(realtimeDir, 'vehicle-positions.pb');
-const tripUpdatesPbFile = path.join(realtimeDir, 'trip-updates.pb');
+// Le posizioni live restano soltanto nella memoria del server: nessun archivio
+// locale e nessun file di output generato per i dati realtime.
 const livePositions = new Map();
 const STALE_AFTER_MS = 120_000;
-let persistQueue = Promise.resolve();
-function writeJsonAtomic(file, value) {
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  fs.renameSync(tmp, file);
-}
-function persistRealtimeFiles() {
-  persistQueue = persistQueue.then(() => {
-    fs.mkdirSync(realtimeDir, { recursive: true });
-    const now = Date.now();
-    const vehicles = [...livePositions.values()].sort((a,b) => b.receivedAt-a.receivedAt);
-    const header = { generatedAt: new Date(now).toISOString(), format: 'Alilaguna Pilot GTFS-RT JSON mirror', staleAfterSeconds: STALE_AFTER_MS/1000 };
-    writeJsonAtomic(vehiclePositionsFile, { header, vehicles });
-    const tripUpdates = vehicles.filter(p => now-p.receivedAt <= STALE_AFTER_MS).map(p => ({
-      tripId:p.tripId, routeId:p.routeId, vehicleId:p.deviceId,
-      timestamp:Math.floor((p.timestamp || p.receivedAt || now)/1000),
-      delaySeconds:p.delaySeconds, stopId:p.nextStopId || null, stopName:p.nextStopName || null, source:'phone-gps'
-    }));
-    writeJsonAtomic(tripUpdatesFile, { header, tripUpdates });
-    const protobuf = GtfsRealtimeBindings.transit_realtime;
-    const feedHeader = { gtfsRealtimeVersion:'2.0', incrementality:0, timestamp:Math.floor(now/1000) };
-    const vehicleEntities = vehicles.filter(p => now-p.receivedAt <= STALE_AFTER_MS).map(p => ({
-      id:p.deviceId, vehicle:{ trip:{tripId:p.tripId,routeId:p.routeId}, vehicle:{id:p.deviceId,label:p.boatName},
-        position:{latitude:p.lat,longitude:p.lon,...(p.bearing!==null?{bearing:p.bearing}:{}),...(p.speedMps!==null?{speed:p.speedMps}:{})},
-        timestamp:Math.floor((p.timestamp||now)/1000), currentStatus:2, ...(p.nextStopId?{stopId:p.nextStopId}:{}) }
-    }));
-    const vpBytes = protobuf.FeedMessage.encode({header:feedHeader,entity:vehicleEntities}).finish();
-    const tuEntities = vehicles.filter(p => now-p.receivedAt <= STALE_AFTER_MS).map(p => ({
-      id:`trip:${p.tripId}:${p.deviceId}`, tripUpdate:{trip:{tripId:p.tripId,routeId:p.routeId},timestamp:Math.floor((p.timestamp||now)/1000),
-        ...(p.nextStopId?{stopTimeUpdate:[{stopId:p.nextStopId,arrival:p.delaySeconds!==null&&p.delaySeconds!==undefined?{delay:p.delaySeconds}:{},departure:p.delaySeconds!==null&&p.delaySeconds!==undefined?{delay:p.delaySeconds}:{}}]}:{})}
-    }));
-    const tuBytes = protobuf.FeedMessage.encode({header:feedHeader,entity:tuEntities}).finish();
-    const writeBufferAtomic = (file, buffer) => { const tmp=`${file}.${process.pid}.tmp`; fs.writeFileSync(tmp,Buffer.from(buffer)); fs.renameSync(tmp,file); };
-    writeBufferAtomic(vehiclePositionsPbFile, vpBytes);
-    writeBufferAtomic(tripUpdatesPbFile, tuBytes);
-  }).catch(error => console.error('Salvataggio realtime fallito:', error.message));
-  return persistQueue;
-}
-try {
-  const stored = JSON.parse(fs.readFileSync(vehiclePositionsFile, 'utf8'));
-  for (const p of (Array.isArray(stored.vehicles) ? stored.vehicles : [])) {
-    if (p?.deviceId && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lon))) livePositions.set(String(p.deviceId), p);
-  }
-} catch (error) { if (error.code !== 'ENOENT') console.warn('Archivio realtime non leggibile:', error.message); }
 app.post('/api/positions', (req, res) => {
   const b = req.body || {};
   const required = ['deviceId','tripId','routeId','boatId','lat','lon'];
@@ -131,7 +74,6 @@ app.post('/api/positions', (req, res) => {
   // Scarta update più vecchi rispetto alla posizione già memorizzata.
   if (prev && item.timestamp < prev.timestamp) return res.status(409).json({ error: 'Aggiornamento GPS più vecchio di quello già ricevuto.' });
   livePositions.set(item.deviceId, item);
-  persistRealtimeFiles();
   res.json({ ok: true, activeDevices: [...livePositions.values()].filter(x => now - x.receivedAt <= STALE_AFTER_MS).length });
 });
 app.get('/api/positions', (_req,res) => {
@@ -181,49 +123,7 @@ app.get('/api/scheduled-vehicles', (_req,res) => {
 });
 function gtfsMinutesServer(s){if(!s||!/^\d{1,3}:\d{2}:\d{2}$/.test(s))return null;const [h,m,sec]=s.split(':').map(Number);return h*60+m+sec/60;}
 
-app.get('/api/gtfs-rt/vehicle-positions.pb', (_req,res) => {
-  const now = Date.now();
-  const entities = [...livePositions.values()].filter(p => now-p.receivedAt <= STALE_AFTER_MS).map(p => ({
-    id: p.deviceId,
-    vehicle: {
-      trip: { tripId: p.tripId, routeId: p.routeId },
-      vehicle: { id: p.deviceId, label: p.boatName },
-      position: { latitude: p.lat, longitude: p.lon, ...(p.bearing !== null ? { bearing: p.bearing } : {}), ...(p.speedMps !== null ? { speed: p.speedMps } : {}) },
-      timestamp: Math.floor(p.timestamp/1000), currentStatus: 2,
-      ...(p.nextStopId ? { stopId: p.nextStopId } : {})
-    }
-  }));
-  const feed = { header: { gtfsRealtimeVersion: '2.0', incrementality: 0, timestamp: Math.floor(now/1000) }, entity: entities };
-  const bytes = GtfsRealtimeBindings.transit_realtime.FeedMessage.encode(feed).finish();
-  res.set('Content-Type','application/x-protobuf');
-  res.set('Cache-Control','no-store');
-  res.send(Buffer.from(bytes));
-});
-app.get('/api/gtfs-rt/vehicle-positions.json', (_req,res) => {
-  const now = Date.now();
-  res.json({ header:{gtfsRealtimeVersion:'2.0',timestamp:Math.floor(now/1000)}, vehicles:[...livePositions.values()].filter(p=>now-p.receivedAt<=STALE_AFTER_MS) });
-});
-app.get('/api/gtfs-rt/trip-updates.json', (_req,res) => {
-  res.set('Cache-Control','no-store');
-  try { res.type('json').send(fs.readFileSync(tripUpdatesFile, 'utf8')); }
-  catch { res.json({ header:{generatedAt:null}, tripUpdates:[] }); }
-});
-app.get('/api/gtfs-rt/trip-updates.pb', (_req,res) => {
-  res.set('Content-Type','application/x-protobuf'); res.set('Cache-Control','no-store');
-  try { res.send(fs.readFileSync(tripUpdatesPbFile)); } catch { const feed=GtfsRealtimeBindings.transit_realtime.FeedMessage.encode({header:{gtfsRealtimeVersion:'2.0',incrementality:0,timestamp:Math.floor(Date.now()/1000)},entity:[]}).finish(); res.send(Buffer.from(feed)); }
-});
-app.get('/api/gtfs-rt/files', (_req,res) => res.json({
-  directory:path.relative(root, realtimeDir),
-  files:[
-    {name:'vehicle-positions.json',url:'/api/gtfs-rt/vehicle-positions.json',path:path.relative(root,vehiclePositionsFile)},
-    {name:'trip-updates.json',url:'/api/gtfs-rt/trip-updates.json',path:path.relative(root,tripUpdatesFile)},
-    {name:'vehicle-positions.pb',url:'/api/gtfs-rt/vehicle-positions.pb',path:path.relative(root,vehiclePositionsPbFile)},
-    {name:'trip-updates.pb',url:'/api/gtfs-rt/trip-updates.pb',path:path.relative(root,tripUpdatesPbFile)}
-  ],
-  persistence:process.env.REALTIME_DATA_DIR ? 'REALTIME_DATA_DIR configurata; verificare che punti a disco persistente' : 'filesystem locale del progetto; su Render free i file possono essere persi ai riavvii'
-}));
-
-app.get('/api/health', (_req,res) => res.json({ ok: true, app: 'alilaguna-pilot', gtfsLoaded: gtfs.trips.length > 0 }));
+app.get('/api/health', (_req,res) => res.json({ ok: true, app: 'alilaguna-pilot', gtfsLoaded: gtfs.trips.length > 0, liveFleet: true }));
 app.get('/api/boats', (_req,res) => res.json(BOATS));
 app.get('/api/routes', (_req,res) => res.json(gtfs.routes.map(r => ({ id:r.route_id, shortName:r.route_short_name, name:r.route_long_name, description:r.route_desc, color:r.route_color, textColor:r.route_text_color }))));
 app.get('/api/trips', (req,res) => {
@@ -241,23 +141,10 @@ function parseNumber(s) {
 }
 function findStationRow(data) {
   const rows = Array.isArray(data) ? data : (data?.data && Array.isArray(data.data) ? data.data : data?.records && Array.isArray(data.records) ? data.records : []);
-  return rows.find(r => /punta salute canal grande/i.test(String(r.stazione || r.station || r.nome || r.name || '')) || String(r.ID_stazione || r.id) === '1025');
+  return rows.find(r => /punta salute canal grande/i.test(String(r.stazione || r.STAZIONE || r.station || r.nome || r.NOME || r.name || '')) || String(r.ID_stazione || r.ID_STAZIONE || r.id || r.station_id) === '1025');
 }
 async function fetchJson(url) {
-  // Bypass anche eventuali cache CDN/proxy a monte: cache:'no-store' da sola
-  // riguarda il client Node, ma non obbliga il server remoto a servire il JSON nuovo.
-  const liveUrl = new URL(url);
-  liveUrl.searchParams.set('_ts', String(Date.now()));
-  const response = await fetch(liveUrl, {
-    cache: 'no-store',
-    headers: {
-      'User-Agent': 'Mozilla/5.0 AlilagunaPilot/1.0 (live tide data)',
-      'Cache-Control': 'no-cache, no-store, max-age=0',
-      'Pragma': 'no-cache',
-      'Expires': '0'
-    },
-    signal: AbortSignal.timeout(12000)
-  });
+  const response = await fetch(url, { headers: { 'User-Agent': 'LagunaPilot/0.1 (Comune Venezia open data integration)' }, signal: AbortSignal.timeout(10000) });
   if (!response.ok) throw new Error(`Fonte marea HTTP ${response.status}`);
   return response.json();
 }
@@ -288,123 +175,40 @@ function comuneTimestampToIso(value) {
   return null;
 }
 
-async function fetchText(url) {
-  const liveUrl = new URL(url);
-  liveUrl.searchParams.set('_ts', String(Date.now()));
-  const response = await fetch(liveUrl, {
-    cache: 'no-store',
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (compatible; AlilagunaPilot/1.0; live tide check)',
-      'Cache-Control': 'no-cache, no-store, max-age=0',
-      'Pragma': 'no-cache',
-      'Expires': '0'
-    },
-    signal: AbortSignal.timeout(12000)
-  });
-  if (!response.ok) throw new Error(`Centro Maree HTTP ${response.status}`);
-  return response.text();
-}
-function parseBetaObserved(html) {
-  // Preferisce il campo osservata esposto dal backend della pagina BETA;
-  // il livello principale della pagina può essere un valore sintetico/previsto.
-  const patterns = [
-    /\[osservata\]\s*=>\s*([+-]?\s*\d+(?:[.,]\d+)?)/i,
-    /\bosservata\s*['"]?\s*[:=]\s*['"]?([+-]?\s*\d+(?:[.,]\d+)?)/i,
-    /Livello attuale\s*:\s*(?:<[^>]*>\s*)*([+-]?\s*\d+(?:[.,]\d+)?)\s*cm/i
-  ];
-  for (const re of patterns) {
-    const m = html.match(re);
-    if (m) {
-      const cm = parseNumber(m[1]);
-      if (Number.isFinite(cm) && cm > -900) return { cm, matched: re.source };
-    }
-  }
-  return null;
-}
 app.get('/api/tide', async (_req,res) => {
-  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-  const retrievedAt = new Date();
-  const errors = [];
-
-  // 1) Fonte preferita: misure grezze della rete telemareografica del CPSM.
-  // Il feed ufficiale dovrebbe aggiornarsi ogni 5 minuti; non accettiamo timestamp vecchi.
   try {
-    const data = await fetchJson(TIDE_URLS.observedFallback);
+    const data = await fetchJson(TIDE_URLS.observed);
     const row = findStationRow(data);
-    if (!row) throw new Error('Punta Salute Canal Grande non presente nel feed delle stazioni');
-    const meters = parseNumber(row.valore ?? row.value ?? row.livello);
-    if (!Number.isFinite(meters) || meters <= -900) throw new Error('Valore osservato non valido');
-    const observedAtRaw = row.data || row.timestamp || row.datetime || null;
+    if (!row) throw new Error('Stazione Punta Salute Canal Grande non trovata nel JSON ufficiale');
+    const valueRaw = row.valore ?? row.VALORE ?? row.value ?? row.livello ?? row.LIVELLO ?? row.level;
+    const meters = parseNumber(valueRaw);
+    if (!Number.isFinite(meters) || meters <= -900) throw new Error('Valore di marea mancante/non valido');
+    const observedAtRaw = row.data || row.DATA || row.DATA_MISURA || row.DATA_OSSERVAZIONE || row.timestamp || row.datetime || null;
     const observedAt = comuneTimestampToIso(observedAtRaw);
-    const ageMinutes = observedAt ? Math.round((retrievedAt.getTime() - new Date(observedAt).getTime()) / 60000) : null;
-    if (ageMinutes == null || ageMinutes < -5 || ageMinutes > 20) {
-      throw new Error(`Feed stazioni non aggiornato: ultima misura ${observedAtRaw || 'senza orario'}`);
-    }
-    return res.json({
-      station: row.stazione || 'Punta Salute Canal Grande',
-      levelMeters: meters, levelCm: Math.round(meters * 100),
-      observedAt, observedAtRaw, retrievedAt: retrievedAt.toISOString(),
-      ageMinutes, stale: false, freshness: 'measured', trendTimestamp: observedAt,
-      warning: null, source: TIDE_URLS.observedFallback, units: 'm', reference: 'ZMPS',
-      disclaimer: 'Dato automatico grezzo del Comune; non validato. La fonte indica aggiornamenti ogni 5 minuti.'
-    });
+    res.json({ station: row.stazione || 'Punta Salute Canal Grande', levelMeters: meters, levelCm: Math.round(meters*100), observedAt, observedAtRaw, retrievedAt: new Date().toISOString(), source: TIDE_URLS.observed, units: 'm', reference: 'ZMPS', disclaimer: 'Dato automatico grezzo del Comune; non validato. Verificare sempre la fonte ufficiale.' });
   } catch (e) {
-    errors.push(`feed stazioni: ${e.message}`);
+    res.status(502).json({ error: 'Impossibile leggere la marea ufficiale in questo momento.', detail: e.message, source: TIDE_URLS.observed });
   }
-
-  // 2) Fallback: il Centro Maree BETA pubblica il campo marea.osservata,
-  // ma non sempre espone l'ora della misura. In tal caso usiamo l'ora di
-  // consultazione solo per campionare la tendenza, mai come ora della misura.
-  try {
-    const page = await fetchText(TIDE_URLS.observed);
-    const observed = parseBetaObserved(page);
-    if (!observed) {
-      if (/\[osservata\]\s*=>\s*(?:N\.D\.|null|—|-)/i.test(page) || /Livello attuale\s*:?\s*(?:<[^>]*>\s*)*N\.D\./i.test(page)) {
-        throw new Error('Il Centro Maree BETA indica livello osservato N.D.');
-      }
-      throw new Error('Campo marea.osservata non trovato nella pagina BETA');
-    }
-    return res.json({
-      station: 'Punta Salute (Centro Maree BETA)',
-      levelMeters: observed.cm / 100, levelCm: Math.round(observed.cm),
-      observedAt: null, observedAtRaw: null, retrievedAt: retrievedAt.toISOString(),
-      ageMinutes: null, stale: false, freshness: 'page-snapshot',
-      trendTimestamp: retrievedAt.toISOString(),
-      warning: 'Il Centro Maree BETA non espone l’orario della singola misura: l’orario mostrato è quello di consultazione della pagina.',
-      source: TIDE_URLS.observed, units: 'cm', reference: 'ZMPS',
-      disclaimer: 'Livello osservato pubblicato dal Centro Maree BETA; timestamp della singola misura non disponibile.'
-    });
-  } catch (e) {
-    errors.push(`pagina BETA: ${e.message}`);
-  }
-
-  res.status(502).json({
-    error: 'Livello attuale di Punta Salute non disponibile: nessuna fonte ha restituito una misura utilizzabile.',
-    detail: errors.join(' | '), source: TIDE_URLS.observedFallback,
-    stationPage: TIDE_URLS.observed, retrievedAt: retrievedAt.toISOString()
-  });
 });
 app.get('/api/tide-forecast', async (_req,res) => {
-  const source = TIDE_URLS.forecast;
   try {
-    const data = await fetchJson(source);
-    if (!Array.isArray(data)) throw new Error('Il JSON previsione non contiene un array');
+    const data = await fetchJson(TIDE_URLS.forecast);
+    const rows = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : Array.isArray(data?.records) ? data.records : [];
     const now = Date.now();
-    const peaks = data.map(row => {
-      const rawAt = row.DATA_ESTREMALE ?? row.data_estremale ?? row.at;
+    const peaks = rows.map(row => {
+      const rawAt = row.DATA_ESTREMALE ?? row.data_estremale ?? row.DATA ?? row.data ?? row.timestamp ?? row.datetime;
       const at = comuneTimestampToIso(rawAt);
-      const typeRaw = String(row.TIPO_ESTREMALE ?? row.tipo_estremale ?? row.type ?? '').toLowerCase();
-      const level = parseNumber(row.VALORE ?? row.valore ?? row.levelCm);
-      if (!at || !Number.isFinite(level)) return null;
-      const type = typeRaw.startsWith('max') ? 'Massimo' : typeRaw.startsWith('min') ? 'Minimo' : typeRaw;
-      return { at, time: new Intl.DateTimeFormat('it-IT',{timeZone:'Europe/Rome',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(at)), type, levelCm: Math.round(level), issuedAt: comuneTimestampToIso(row.DATA_PREVISIONE ?? row.data_previsione) };
-    }).filter(p => p && new Date(p.at).getTime() > now).sort((a,b)=>new Date(a.at)-new Date(b.at));
-    const unique = peaks.filter((p,i,a)=>a.findIndex(q=>q.at===p.at&&q.type===p.type)===i).slice(0,4);
-    if (!unique.length) throw new Error('Il JSON ufficiale non contiene picchi futuri riconoscibili');
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.json({ source, retrievedAt:new Date().toISOString(), issuedAt:unique[0].issuedAt || null, peaks:unique, nextPeak:unique[0], method:'Estremali estratti dal JSON ufficiale previsione.json; orari della fonte interpretati in ora solare UTC+1.' });
+      const rawLevel = row.VALORE ?? row.valore ?? row.value ?? row.livello;
+      const levelCm = parseNumber(rawLevel);
+      const typeRaw = String(row.TIPO_ESTREMALE ?? row.tipo_estremale ?? row.tipo ?? row.type ?? '').trim();
+      if (!at || !Number.isFinite(levelCm) || !typeRaw) return null;
+      const type = /max|mass/i.test(typeRaw) ? 'Massimo' : /min/i.test(typeRaw) ? 'Minimo' : typeRaw;
+      return { at, time: new Intl.DateTimeFormat('it-IT',{timeZone:'Europe/Rome',hour:'2-digit',minute:'2-digit'}).format(new Date(at)), type, levelCm: Math.round(levelCm) };
+    }).filter(p => p && new Date(p.at).getTime() > now).sort((a,b)=>new Date(a.at)-new Date(b.at)).slice(0,4);
+    if (!peaks.length) throw new Error('Il JSON ufficiale non contiene estremi futuri riconoscibili.');
+    res.json({ source:TIDE_URLS.forecast, retrievedAt:new Date().toISOString(), peaks, nextPeak:peaks[0], method:'Estremi futuri letti dagli Open Data ufficiali del Comune di Venezia.' });
   } catch (e) {
-    res.status(502).json({ error:'Previsione marea non disponibile.', detail:e.message, source });
+    res.status(502).json({ error:'Previsione marea non disponibile dagli Open Data ufficiali.', detail:e.message, source:TIDE_URLS.forecast });
   }
 });
 app.get('/api/checkpoints', (_req,res) => res.json(TIDE_CHECKPOINTS));
@@ -417,4 +221,4 @@ if (fs.existsSync(dist)) {
   app.get('/', (_req,res) => res.type('text').send('Alilaguna Pilot API attiva. Avvia il frontend con npm run dev oppure esegui npm run build.'));
 }
 const server = app.listen(port, () => console.log(`Alilaguna Pilot in ascolto sulla porta ${port}`));
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { server.close(async () => { await persistRealtimeFiles(); process.exit(0); }); });
+
