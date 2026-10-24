@@ -32,7 +32,11 @@ Modificare `server/config.js`. I dati dimostrativi sono segnaposto e non devono 
 
 ## Marea
 
-Il dato osservato primario viene letto dalla pagina ufficiale [Centro Maree BETA](https://www.comune.venezia.it/it/content/centro-previsioni-e-segnalazioni-maree-beta), cercando il campo di marea osservata/livello attuale; la pagina non sempre espone l'ora della singola misura, quindi l'interfaccia mostra l'ora di consultazione e non la spaccia per ora di rilevazione. Se il campo non è riconoscibile, il backend prova il dataset delle stazioni `livello.json`, ma lo accetta soltanto se la misurazione è recente (massimo 20 minuti). Le previsioni usano `http://dati.venezia.it/sites/default/files/dataset/opendata/previsione.json`; i timestamp della fonte sono interpretati come ora solare fissa UTC+1 e visualizzati in `Europe/Rome`. I dati automatici possono essere grezzi/non validati: verificare sempre la fonte ufficiale.
+- **Previsioni:** `https://dati.venezia.it/sites/default/files/dataset/opendata/previsione.json` (estremali in cm, interpretati secondo l'ora solare della fonte).
+- **Dato osservato preferito:** `https://dati.venezia.it/sites/default/files/dataset/opendata/livello.json`, filtrato sulla stazione `Punta Salute Canal Grande` (ID `1025`). Il valore viene accettato soltanto se il timestamp della misura è entro 20 minuti. Il Comune dichiara aggiornamenti ogni 5 minuti per questo dataset.
+- **Fallback del dato attuale:** pagina ufficiale [Centro Maree BETA](https://www.comune.venezia.it/it/content/centro-previsioni-e-segnalazioni-maree-beta), campo `marea.osservata`. Se la pagina non espone l'ora della singola misura, l'app mostra l'ora di consultazione e lo dichiara esplicitamente.
+- **Tendenza:** viene calcolata dai campioni raccolti dall'app durante gli aggiornamenti (ogni minuto). Quando la fonte fornisce un timestamp di misura si usa quello; nel fallback BETA si usa il timestamp di consultazione come timestamp del campione, non come orario della misura.
+- Se entrambe le fonti sono indisponibili o non contengono una misura valida, l'API restituisce un errore invece di inventare un valore. Le misure automatiche sono grezze/non validate e non sostituiscono le indicazioni operative del Centro Maree.
 
 ## Stima ritardo
 
