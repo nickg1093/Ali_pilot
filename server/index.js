@@ -148,6 +148,38 @@ async function fetchJson(url) {
   if (!response.ok) throw new Error(`Fonte marea HTTP ${response.status}`);
   return response.json();
 }
+
+// La pagina ufficiale di Punta Salute espone le misure osservate in una tabella HTML.
+// Il vecchio endpoint Open Data /livello.json restituisce soltanto l'anagrafica delle stazioni.
+function htmlText(value) {
+  return String(value).replace(/<[^>]*>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '\"').replace(/&#39;|&apos;/gi, "'").replace(/\s+/g, ' ').trim();
+}
+function parseObservedTideHtml(html) {
+  const rows = [];
+  for (const match of String(html).matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
+    const cells = [...match[1].matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(m => htmlText(m[1]));
+    if (cells.length < 2) continue;
+    const date = cells.find(v => /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?$/.test(v));
+    if (!date) continue;
+    const idx = cells.indexOf(date);
+    const level = parseNumber(cells[idx + 1]);
+    if (!Number.isFinite(level) || level <= -900) continue;
+    rows.push({ observedAtRaw: date, levelMeters: level, temperatureC: Number.isFinite(parseNumber(cells[idx + 2])) ? parseNumber(cells[idx + 2]) : null });
+  }
+  rows.sort((a,b) => String(a.observedAtRaw).localeCompare(String(b.observedAtRaw)));
+  if (!rows.length) throw new Error('La pagina ufficiale non contiene righe di marea riconoscibili.');
+  return { latest: rows[rows.length - 1], rows, rowCount: rows.length };
+}
+async function fetchObservedTide() {
+  const response = await fetch(TIDE_URLS.observed, {
+    headers: { 'User-Agent': 'AlilagunaPilot/1.0 (integrazione dati ufficiali Comune di Venezia)', 'Accept': 'text/html' },
+    signal: AbortSignal.timeout(12000)
+  });
+  if (!response.ok) throw new Error(`Fonte ufficiale marea HTTP ${response.status}`);
+  const html = await response.text();
+  if (!/<html|<table|<tr/i.test(html)) throw new Error('La fonte ufficiale non ha restituito una pagina HTML leggibile.');
+  return { ...parseObservedTideHtml(html), httpStatus: response.status, contentType: response.headers.get('content-type') };
+}
 // Il Comune pubblica l'orario come ora solare fissa UTC+1 tutto l'anno.
 // Convertiamo quel wall-clock in un istante assoluto, poi il frontend lo visualizza in Europe/Rome (CET/CEST).
 function comuneTimestampToIso(value) {
@@ -186,54 +218,29 @@ app.get('/debug-marea', (_req, res) => {
 app.get('/api/tide/debug', async (_req,res) => {
   const checkedAt = new Date().toISOString();
   try {
-    const response = await fetch(TIDE_URLS.observed, {
-      headers: { 'User-Agent': 'LagunaPilot/0.1 (Comune Venezia open data integration)', 'Accept': 'application/json' },
-      signal: AbortSignal.timeout(10000)
-    });
-    const contentType = response.headers.get('content-type');
-    const body = await response.text();
-    let data;
-    try { data = JSON.parse(body); }
-    catch (e) {
-      return res.status(502).json({ ok:false, checkedAt, source:TIDE_URLS.observed, httpStatus:response.status, contentType, bodyStart:body.slice(0,500), error:'La risposta della fonte non è JSON valido: '+e.message });
-    }
-    const rows = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : Array.isArray(data?.records) ? data.records : [];
-    const row = findStationRow(data);
-    const valueKeys = ['valore','VALORE','value','livello','LIVELLO','level'];
-    const timeKeys = ['data','DATA','DATA_MISURA','DATA_OSSERVAZIONE','timestamp','datetime'];
-    const stationKeys = ['stazione','STAZIONE','station','nome','NOME','name','ID_stazione','ID_STAZIONE','id','station_id'];
-    const pick = (obj, keys) => Object.fromEntries(keys.filter(k => obj && Object.prototype.hasOwnProperty.call(obj,k)).map(k => [k,obj[k]]));
-    return res.json({
-      ok:response.ok && !!row && Number.isFinite(parseNumber(valueKeys.map(k=>row?.[k]).find(v=>v!==undefined&&v!==null))),
-      checkedAt, source:TIDE_URLS.observed, httpStatus:response.status, contentType,
-      topLevelType:Array.isArray(data)?'array':typeof data,
-      topLevelKeys:data && !Array.isArray(data) && typeof data==='object'?Object.keys(data):[],
-      rowCount:rows.length, firstRowKeys:rows[0] && typeof rows[0]==='object'?Object.keys(rows[0]):[],
-      stationFound:!!row, stationFields:row?pick(row,stationKeys):null,
-      valueFields:row?pick(row,valueKeys):null, timestampFields:row?pick(row,timeKeys):null,
-      parsedMeters:row?parseNumber(valueKeys.map(k=>row?.[k]).find(v=>v!==undefined&&v!==null)):null,
-      parsedObservedAt:row?comuneTimestampToIso(timeKeys.map(k=>row?.[k]).find(v=>v!==undefined&&v!==null)):null,
-      sampleRows:rows.slice(0,3),
-      error:!response.ok?`La fonte ha risposto HTTP ${response.status}`:!row?'Nessuna riga riconosciuta per Punta Salute / ID 1025':undefined
-    });
+    const result = await fetchObservedTide();
+    return res.json({ ok:true, checkedAt, source:TIDE_URLS.observed, httpStatus:result.httpStatus, contentType:result.contentType,
+      station:'Punta Salute Canal Grande', rowCount:result.rowCount, latest:result.latest,
+      parsedMeters:result.latest.levelMeters, parsedObservedAt:comuneTimestampToIso(result.latest.observedAtRaw),
+      sampleRows:result.rows.slice(-3), note:'Dato osservato grezzo del Comune; non validato.' });
   } catch (e) {
-    return res.status(502).json({ ok:false, checkedAt, source:TIDE_URLS.observed, error:e.message, hint:'Controllare rete in uscita, DNS e timeout del server.' });
+    return res.status(502).json({ ok:false, checkedAt, source:TIDE_URLS.observed, error:e.message,
+      hint:'La fonte ufficiale potrebbe essere temporaneamente non disponibile o aver cambiato formato.' });
   }
 });
 
 app.get('/api/tide', async (_req,res) => {
   try {
-    const data = await fetchJson(TIDE_URLS.observed);
-    const row = findStationRow(data);
-    if (!row) throw new Error('Stazione Punta Salute Canal Grande non trovata nel JSON ufficiale');
-    const valueRaw = row.valore ?? row.VALORE ?? row.value ?? row.livello ?? row.LIVELLO ?? row.level;
-    const meters = parseNumber(valueRaw);
-    if (!Number.isFinite(meters) || meters <= -900) throw new Error('Valore di marea mancante/non valido');
-    const observedAtRaw = row.data || row.DATA || row.DATA_MISURA || row.DATA_OSSERVAZIONE || row.timestamp || row.datetime || null;
-    const observedAt = comuneTimestampToIso(observedAtRaw);
-    res.json({ station: row.stazione || 'Punta Salute Canal Grande', levelMeters: meters, levelCm: Math.round(meters*100), observedAt, observedAtRaw, retrievedAt: new Date().toISOString(), source: TIDE_URLS.observed, units: 'm', reference: 'ZMPS', disclaimer: 'Dato automatico grezzo del Comune; non validato. Verificare sempre la fonte ufficiale.' });
+    const result = await fetchObservedTide();
+    const latest = result.latest;
+    const observedAt = comuneTimestampToIso(latest.observedAtRaw);
+    res.set('Cache-Control', 'no-store');
+    res.json({ station:'Punta Salute Canal Grande', levelMeters:latest.levelMeters, levelCm:Math.round(latest.levelMeters*100),
+      observedAt, observedAtRaw:latest.observedAtRaw, temperatureC:latest.temperatureC,
+      retrievedAt:new Date().toISOString(), source:TIDE_URLS.observed, units:'m', reference:'ZMPS',
+      disclaimer:'Dato automatico grezzo del Comune; non validato. L’orario pubblicato dal Comune è in ora solare UTC+1.' });
   } catch (e) {
-    res.status(502).json({ error: 'Impossibile leggere la marea ufficiale in questo momento.', detail: e.message, source: TIDE_URLS.observed });
+    res.status(502).json({ error:'Impossibile leggere la marea ufficiale in questo momento.', detail:e.message, source:TIDE_URLS.observed });
   }
 });
 app.get('/api/tide-forecast', async (_req,res) => {
