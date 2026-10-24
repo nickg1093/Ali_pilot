@@ -32,7 +32,7 @@ Modificare `server/config.js`. I dati dimostrativi sono segnaposto e non devono 
 
 ## Marea
 
-Il backend recupera il dataset del Comune di Venezia. L'orario della fonte, pubblicato in ora solare fissa UTC+1, viene convertito in un istante e mostrato in `Europe/Rome`, con gestione automatica CET/CEST. Il dato può essere grezzo/non validato: verificare sempre la fonte ufficiale.
+Il dato osservato primario viene letto dalla pagina ufficiale [Centro Maree BETA](https://www.comune.venezia.it/it/content/centro-previsioni-e-segnalazioni-maree-beta), cercando il campo di marea osservata/livello attuale; la pagina non sempre espone l'ora della singola misura, quindi l'interfaccia mostra l'ora di consultazione e non la spaccia per ora di rilevazione. Se il campo non è riconoscibile, il backend prova il dataset delle stazioni `livello.json`, ma lo accetta soltanto se la misurazione è recente (massimo 20 minuti). Le previsioni usano `http://dati.venezia.it/sites/default/files/dataset/opendata/previsione.json`; i timestamp della fonte sono interpretati come ora solare fissa UTC+1 e visualizzati in `Europe/Rome`. I dati automatici possono essere grezzi/non validati: verificare sempre la fonte ufficiale.
 
 ## Stima ritardo
 
