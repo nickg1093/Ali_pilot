@@ -11,6 +11,13 @@ const root = path.resolve(__dirname, '..');
 const app = express();
 const port = process.env.PORT || 10000;
 app.disable('x-powered-by');
+// API dinamiche: non consentire cache intermedie/browser, soprattutto per la marea.
+app.use('/api', (_req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  next();
+});
 app.use(express.json());
 
 function readCsv(name) {
@@ -237,7 +244,20 @@ function findStationRow(data) {
   return rows.find(r => /punta salute canal grande/i.test(String(r.stazione || r.station || r.nome || r.name || '')) || String(r.ID_stazione || r.id) === '1025');
 }
 async function fetchJson(url) {
-  const response = await fetch(url, { headers: { 'User-Agent': 'LagunaPilot/0.1 (Comune Venezia open data integration)' }, signal: AbortSignal.timeout(10000) });
+  // Bypass anche eventuali cache CDN/proxy a monte: cache:'no-store' da sola
+  // riguarda il client Node, ma non obbliga il server remoto a servire il JSON nuovo.
+  const liveUrl = new URL(url);
+  liveUrl.searchParams.set('_ts', String(Date.now()));
+  const response = await fetch(liveUrl, {
+    cache: 'no-store',
+    headers: {
+      'User-Agent': 'Mozilla/5.0 AlilagunaPilot/1.0 (live tide data)',
+      'Cache-Control': 'no-cache, no-store, max-age=0',
+      'Pragma': 'no-cache',
+      'Expires': '0'
+    },
+    signal: AbortSignal.timeout(12000)
+  });
   if (!response.ok) throw new Error(`Fonte marea HTTP ${response.status}`);
   return response.json();
 }
@@ -268,69 +288,95 @@ function comuneTimestampToIso(value) {
   return null;
 }
 
+async function fetchText(url) {
+  const liveUrl = new URL(url);
+  liveUrl.searchParams.set('_ts', String(Date.now()));
+  const response = await fetch(liveUrl, {
+    cache: 'no-store',
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; AlilagunaPilot/1.0; live tide check)',
+      'Cache-Control': 'no-cache, no-store, max-age=0',
+      'Pragma': 'no-cache',
+      'Expires': '0'
+    },
+    signal: AbortSignal.timeout(12000)
+  });
+  if (!response.ok) throw new Error(`Centro Maree HTTP ${response.status}`);
+  return response.text();
+}
+function parseBetaObserved(html) {
+  // Preferisce il campo osservata esposto dal backend della pagina BETA;
+  // il livello principale della pagina può essere un valore sintetico/previsto.
+  const patterns = [
+    /\[osservata\]\s*=>\s*([+-]?\s*\d+(?:[.,]\d+)?)/i,
+    /\bosservata\s*['"]?\s*[:=]\s*['"]?([+-]?\s*\d+(?:[.,]\d+)?)/i,
+    /Livello attuale\s*:\s*(?:<[^>]*>\s*)*([+-]?\s*\d+(?:[.,]\d+)?)\s*cm/i
+  ];
+  for (const re of patterns) {
+    const m = html.match(re);
+    if (m) {
+      const cm = parseNumber(m[1]);
+      if (Number.isFinite(cm) && cm > -900) return { cm, matched: re.source };
+    }
+  }
+  return null;
+}
 app.get('/api/tide', async (_req,res) => {
   try {
-    const data = await fetchJson(TIDE_URLS.observed);
+    const page = await fetchText(TIDE_URLS.observed);
+    const observed = parseBetaObserved(page);
+    if (observed) {
+      const retrievedAt = new Date();
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      return res.json({
+        station: 'Punta Salute (Centro Maree BETA)', levelMeters: observed.cm / 100,
+        levelCm: Math.round(observed.cm), observedAt: null, observedAtRaw: null,
+        retrievedAt: retrievedAt.toISOString(), ageMinutes: null, stale: false,
+        freshness: 'unknown',
+        warning: 'Valore corrente letto dalla pagina ufficiale BETA. La pagina non espone qui l’orario della singola misurazione.',
+        source: TIDE_URLS.observed, units: 'cm', reference: 'ZMPS',
+        disclaimer: 'Dato pubblicato dal Centro Maree; verificare l’orario della rilevazione nella fonte ufficiale.'
+      });
+    }
+    // Se il markup BETA cambia, usa il feed grezzo delle stazioni solo se contiene
+    // una misurazione recente. Non presenta mai un valore vecchio come attuale.
+    const data = await fetchJson(TIDE_URLS.observedFallback);
     const row = findStationRow(data);
-    if (!row) throw new Error('Stazione Punta Salute Canal Grande non trovata nel JSON ufficiale');
-    const valueRaw = row.valore ?? row.value ?? row.livello;
-    const meters = parseNumber(valueRaw);
+    if (!row) throw new Error('La pagina BETA non espone il valore osservato e la stazione non è presente nel feed di fallback');
+    const meters = parseNumber(row.valore ?? row.value ?? row.livello);
     if (!Number.isFinite(meters) || meters <= -900) throw new Error('Valore di marea mancante/non valido');
     const observedAtRaw = row.data || row.timestamp || row.datetime || null;
     const observedAt = comuneTimestampToIso(observedAtRaw);
-    res.json({ station: row.stazione || 'Punta Salute Canal Grande', levelMeters: meters, levelCm: Math.round(meters*100), observedAt, observedAtRaw, retrievedAt: new Date().toISOString(), source: TIDE_URLS.observed, units: 'm', reference: 'ZMPS', disclaimer: 'Dato automatico grezzo del Comune; non validato. Verificare sempre la fonte ufficiale.' });
+    const retrievedAt = new Date();
+    const ageMinutes = observedAt ? Math.round((retrievedAt.getTime() - new Date(observedAt).getTime()) / 60000) : null;
+    const stale = ageMinutes == null || ageMinutes < -5 || ageMinutes > 20;
+    if (stale) throw new Error(`Il feed stazioni è fermo o obsoleto (ultima misura: ${observedAtRaw || 'orario assente'}); la pagina BETA non ha restituito un valore osservato riconoscibile.`);
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    return res.json({ station: row.stazione || 'Punta Salute Canal Grande', levelMeters: meters, levelCm: Math.round(meters*100), observedAt, observedAtRaw, retrievedAt: retrievedAt.toISOString(), ageMinutes, stale: false, freshness:'measured', warning:null, source: TIDE_URLS.observedFallback, units: 'm', reference: 'ZMPS', disclaimer: 'Dato automatico grezzo del Comune; non validato.' });
   } catch (e) {
-    res.status(502).json({ error: 'Impossibile leggere la marea ufficiale in questo momento.', detail: e.message, source: TIDE_URLS.observed });
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.status(502).json({ error: 'Impossibile leggere il livello osservato dal Centro Maree.', detail: e.message, source: TIDE_URLS.observed });
   }
 });
 app.get('/api/tide-forecast', async (_req,res) => {
-  // Testo ufficiale della segreteria del Centro Maree: estremi previsti per data, ora e quota.
-  const source = 'https://www.comune.venezia.it/sites/default/files/publicCPSM/segretel/testoSegreteria.txt';
+  const source = TIDE_URLS.forecast;
   try {
-    const response = await fetch(source, { headers: { 'User-Agent': 'Mozilla/5.0 AlilagunaPilot/1.0' }, signal: AbortSignal.timeout(12000) });
-    if (!response.ok) throw new Error(`Centro Maree HTTP ${response.status}`);
-    const plain = (await response.text()).replace(/^\uFEFF/, '').replace(/\r/g, '');
-    const issue = plain.match(/Previsione\s+delle\s+ore\s+(\d{1,2}:\d{2})\s+del\s+giorno\s+(\d{1,2})\s+([a-zàèéìòù]+)/i);
-    const months = { gennaio:0, febbraio:1, marzo:2, aprile:3, maggio:4, giugno:5, luglio:6, agosto:7, settembre:8, ottobre:9, novembre:10, dicembre:11 };
-    const now = new Date();
-    const romeParts = new Intl.DateTimeFormat('en-GB', { timeZone:'Europe/Rome', year:'numeric', month:'numeric', day:'numeric', hour:'numeric', minute:'numeric', hourCycle:'h23' }).formatToParts(now).reduce((o,p)=>(o[p.type]=Number(p.value)||p.value,o),{});
-    const nowRome = new Date(romeParts.year, romeParts.month-1, romeParts.day, romeParts.hour, romeParts.minute);
-    function romeDate(y, mo, d, h, mi) {
-      // Interpreta l'ora locale Europe/Rome e restituisce un istante UTC corretto anche con ora legale.
-      const target = Date.UTC(y,mo,d,h,mi);
-      let guess = target;
-      for (let i=0;i<3;i++) {
-        const parts = new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Rome',year:'numeric',month:'numeric',day:'numeric',hour:'numeric',minute:'numeric',hourCycle:'h23'}).formatToParts(new Date(guess)).reduce((o,p)=>(o[p.type]=Number(p.value),o),{});
-        const represented = Date.UTC(parts.year,parts.month-1,parts.day,parts.hour,parts.minute);
-        guess += target-represented;
-      }
-      return new Date(guess);
-    }
-    let baseYear = romeParts.year;
-    if (issue) {
-      const mo = months[issue[3].toLocaleLowerCase('it')];
-      if (mo !== undefined && mo < romeParts.month-1 && romeParts.month===1) baseYear--;
-    }
-    const extrema = [];
-    let currentDay = null, currentMonth = null;
-    for (const line of plain.split('\n')) {
-      const dateMatch = line.match(/^\s*(\d{1,2})\s+([a-zàèéìòù]+)\s*$/i);
-      if (dateMatch && months[dateMatch[2].toLocaleLowerCase('it')] !== undefined) {
-        currentDay = Number(dateMatch[1]); currentMonth = months[dateMatch[2].toLocaleLowerCase('it')]; continue;
-      }
-      const peakMatch = line.match(/^\s*ore\s+(\d{1,2}:\d{2}),\s*(minimo|massimo),\s*(-?\d+(?:[.,]\d+)?)\s*cm\.?\s*$/i);
-      if (peakMatch && currentDay !== null && currentMonth !== null) {
-        let y = baseYear;
-        // Gestisce l'elenco a cavallo tra dicembre e gennaio.
-        if (currentMonth===0 && romeParts.month===12) y++;
-        const [h,mi] = peakMatch[1].split(':').map(Number);
-        extrema.push({ at:romeDate(y,currentMonth,currentDay,h,mi).toISOString(), time:peakMatch[1], type:peakMatch[2][0].toUpperCase()+peakMatch[2].slice(1).toLowerCase(), levelCm:Number(peakMatch[3].replace(',','.')) });
-      }
-    }
-    const peaks = extrema.filter(p=>new Date(p.at)>now).sort((a,b)=>new Date(a.at)-new Date(b.at)).slice(0,4);
-    if (!peaks.length) throw new Error('Il testo ufficiale non contiene estremi futuri riconoscibili.');
-    const issuedAt = issue ? (()=>{ const mo=months[issue[3].toLocaleLowerCase('it')]; return mo===undefined?null:romeDate(baseYear,mo,Number(issue[2]),...issue[1].split(':').map(Number)).toISOString(); })() : null;
-    res.json({ source, retrievedAt:new Date().toISOString(), issuedAt, peaks, nextPeak:peaks[0], method:'Quattro estremi futuri estratti dal testo ufficiale del Centro Maree; orari Europe/Rome.' });
+    const data = await fetchJson(source);
+    if (!Array.isArray(data)) throw new Error('Il JSON previsione non contiene un array');
+    const now = Date.now();
+    const peaks = data.map(row => {
+      const rawAt = row.DATA_ESTREMALE ?? row.data_estremale ?? row.at;
+      const at = comuneTimestampToIso(rawAt);
+      const typeRaw = String(row.TIPO_ESTREMALE ?? row.tipo_estremale ?? row.type ?? '').toLowerCase();
+      const level = parseNumber(row.VALORE ?? row.valore ?? row.levelCm);
+      if (!at || !Number.isFinite(level)) return null;
+      const type = typeRaw.startsWith('max') ? 'Massimo' : typeRaw.startsWith('min') ? 'Minimo' : typeRaw;
+      return { at, time: new Intl.DateTimeFormat('it-IT',{timeZone:'Europe/Rome',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(at)), type, levelCm: Math.round(level), issuedAt: comuneTimestampToIso(row.DATA_PREVISIONE ?? row.data_previsione) };
+    }).filter(p => p && new Date(p.at).getTime() > now).sort((a,b)=>new Date(a.at)-new Date(b.at));
+    const unique = peaks.filter((p,i,a)=>a.findIndex(q=>q.at===p.at&&q.type===p.type)===i).slice(0,4);
+    if (!unique.length) throw new Error('Il JSON ufficiale non contiene picchi futuri riconoscibili');
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.json({ source, retrievedAt:new Date().toISOString(), issuedAt:unique[0].issuedAt || null, peaks:unique, nextPeak:unique[0], method:'Estremali estratti dal JSON ufficiale previsione.json; orari della fonte interpretati in ora solare UTC+1.' });
   } catch (e) {
     res.status(502).json({ error:'Previsione marea non disponibile.', detail:e.message, source });
   }
