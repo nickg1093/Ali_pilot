@@ -23,6 +23,6 @@ export const TIDE_CHECKPOINTS = [
 
 // Fonte ufficiale Comune di Venezia / Open Data CPSM.
 export const TIDE_URLS = {
-  observed: 'https://www.comune.venezia.it/sites/default/files/publicCPSM2/stazioni/temporeale/Punta_Salute.html',
+  observed: 'https://dati.venezia.it/sites/default/files/dataset/opendata/livello.json',
   forecast: 'https://dati.venezia.it/sites/default/files/dataset/opendata/previsione.json'
 };

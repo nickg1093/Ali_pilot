@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import { parse } from 'csv-parse/sync';
+import GtfsRealtimeBindings from 'gtfs-realtime-bindings';
 import { BOATS, TIDE_CHECKPOINTS, TIDE_URLS } from './config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -47,8 +48,8 @@ function tripStops(tripId) {
   });
 }
 
-// Le posizioni live restano soltanto nella memoria del server: nessun archivio
-// locale e nessun file di output generato per i dati realtime.
+// Posizioni condivise fra i dispositivi collegati alla stessa istanza del server.
+// In memoria per il prototipo: per disponibilità persistente/multiistanza usare Redis o PostgreSQL.
 const livePositions = new Map();
 const STALE_AFTER_MS = 120_000;
 app.post('/api/positions', (req, res) => {
@@ -86,44 +87,36 @@ app.get('/api/positions', (_req,res) => {
     return {
       ...p,
       stale: now-p.receivedAt > STALE_AFTER_MS,
-      completed: (() => { const ss=tripStops(p.tripId); const last=ss.at(-1); const lm=gtfsMinutesServer(last?.arrival)||gtfsMinutesServer(last?.departure); if(lm==null)return false; const pp=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Rome',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(new Date()); const vv=k=>Number(pp.find(x=>x.type===k)?.value||0); let nm=vv('hour')*60+vv('minute')+vv('second')/60; let end=lm; while(nm-end>720)nm-=1440; while(end-nm>720)end-=1440; return nm>end+15; })(),
       routeColor: route.route_color || null,
       stops: tripStops(p.tripId),
       shape: gtfsTrip ? (shapeGroups.get(gtfsTrip.shape_id) || []) : []
     };
   }).sort((a,b)=>b.receivedAt-a.receivedAt));
 });
-// Posizioni simulate delle corse GTFS attualmente in servizio. Sono stime animate,
-// non posizioni reali: il client le sopprime quando esiste un GPS recente per la stessa corsa.
-app.get('/api/scheduled-vehicles', (_req,res) => {
-  const parts = new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Rome',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(new Date());
-  const val = k => Number(parts.find(p=>p.type===k)?.value||0);
-  const nowMin = val('hour')*60+val('minute')+val('second')/60;
-  const active=[];
-  for (const t of gtfs.trips) {
-    if (!serviceRunsToday(t.service_id)) continue;
-    const stops=tripStops(t.trip_id); if(stops.length<2) continue;
-    const timed=stops.map(s=>({...s,minute:gtfsMinutesServer(s.departure)||gtfsMinutesServer(s.arrival)}));
-    const first=timed[0].minute,last=timed[timed.length-1].minute;
-    if(first==null||last==null) continue;
-    let n=nowMin; while(n<first-720)n+=1440; while(n>last+720)n-=1440;
-    if(n<first||n>last) continue;
-    let i=0; while(i<timed.length-2 && timed[i+1].minute<n)i++;
-    const a=timed[i],b=timed[i+1]; if(a.minute==null||b.minute==null||b.minute<=a.minute)continue;
-    const shape=(shapeGroups.get(t.shape_id)||[]).map(p=>({lat:p.lat,lon:p.lon})); if(shape.length<2)continue;
-    const nearestIndex=stop=>{let best=0,dmin=Infinity;shape.forEach((p,j)=>{const d=(p.lat-stop.lat)**2+(p.lon-stop.lon)**2;if(d<dmin){dmin=d;best=j;}});return best;};
-    const ia=nearestIndex(a),ib=Math.max(ia+1,nearestIndex(b));
-    const f=Math.max(0,Math.min(1,(n-a.minute)/(b.minute-a.minute)));
-    const pointAt=(idx)=>shape[Math.min(shape.length-1,Math.max(0,idx))];
-    const raw=ia+(ib-ia)*f,lo=Math.floor(raw),hi=Math.min(shape.length-1,lo+1),q=raw-lo,p0=pointAt(lo),p1=pointAt(hi);
-    const route=routeById.get(t.route_id)||{};
-    active.push({deviceId:`scheduled:${t.trip_id}`,simulated:true,stale:false,tripId:t.trip_id,routeId:t.route_id,boatId:null,boatName:`Corsa ${t.trip_id}`,routeName:route.route_short_name||t.route_id,lat:p0.lat+(p1.lat-p0.lat)*q,lon:p0.lon+(p1.lon-p0.lon)*q,speedMps:null,delaySeconds:null,nextStopId:b.stopId,nextStopName:b.name,timestamp:Date.now(),routeColor:route.route_color||null,stops,shape});
-  }
-  res.set('Cache-Control','no-store');res.json(active);
+app.get('/api/gtfs-rt/vehicle-positions.pb', (_req,res) => {
+  const now = Date.now();
+  const entities = [...livePositions.values()].filter(p => now-p.receivedAt <= STALE_AFTER_MS).map(p => ({
+    id: p.deviceId,
+    vehicle: {
+      trip: { tripId: p.tripId, routeId: p.routeId },
+      vehicle: { id: p.deviceId, label: p.boatName },
+      position: { latitude: p.lat, longitude: p.lon, ...(p.bearing !== null ? { bearing: p.bearing } : {}), ...(p.speedMps !== null ? { speed: p.speedMps } : {}) },
+      timestamp: Math.floor(p.timestamp/1000), currentStatus: 2,
+      ...(p.nextStopId ? { stopId: p.nextStopId } : {})
+    }
+  }));
+  const feed = { header: { gtfsRealtimeVersion: '2.0', incrementality: 0, timestamp: Math.floor(now/1000) }, entity: entities };
+  const bytes = GtfsRealtimeBindings.transit_realtime.FeedMessage.encode(feed).finish();
+  res.set('Content-Type','application/x-protobuf');
+  res.set('Cache-Control','no-store');
+  res.send(Buffer.from(bytes));
 });
-function gtfsMinutesServer(s){if(!s||!/^\d{1,3}:\d{2}:\d{2}$/.test(s))return null;const [h,m,sec]=s.split(':').map(Number);return h*60+m+sec/60;}
+app.get('/api/gtfs-rt/vehicle-positions.json', (_req,res) => {
+  const now = Date.now();
+  res.json({ header:{gtfsRealtimeVersion:'2.0',timestamp:Math.floor(now/1000)}, vehicles:[...livePositions.values()].filter(p=>now-p.receivedAt<=STALE_AFTER_MS) });
+});
 
-app.get('/api/health', (_req,res) => res.json({ ok: true, app: 'alilaguna-pilot', gtfsLoaded: gtfs.trips.length > 0, liveFleet: true }));
+app.get('/api/health', (_req,res) => res.json({ ok: true, app: 'alilaguna-pilot', gtfsLoaded: gtfs.trips.length > 0 }));
 app.get('/api/boats', (_req,res) => res.json(BOATS));
 app.get('/api/routes', (_req,res) => res.json(gtfs.routes.map(r => ({ id:r.route_id, shortName:r.route_short_name, name:r.route_long_name, description:r.route_desc, color:r.route_color, textColor:r.route_text_color }))));
 app.get('/api/trips', (req,res) => {
@@ -141,78 +134,12 @@ function parseNumber(s) {
 }
 function findStationRow(data) {
   const rows = Array.isArray(data) ? data : (data?.data && Array.isArray(data.data) ? data.data : data?.records && Array.isArray(data.records) ? data.records : []);
-  return rows.find(r => /punta salute canal grande/i.test(String(r.stazione || r.STAZIONE || r.station || r.nome || r.NOME || r.name || '')) || String(r.ID_stazione || r.ID_STAZIONE || r.id || r.station_id) === '1025');
+  return rows.find(r => /punta salute canal grande/i.test(String(r.stazione || r.station || r.nome || r.name || '')) || String(r.ID_stazione || r.id) === '1025');
 }
 async function fetchJson(url) {
   const response = await fetch(url, { headers: { 'User-Agent': 'LagunaPilot/0.1 (Comune Venezia open data integration)' }, signal: AbortSignal.timeout(10000) });
   if (!response.ok) throw new Error(`Fonte marea HTTP ${response.status}`);
   return response.json();
-}
-
-// La pagina ufficiale di Punta Salute espone le misure osservate in una tabella HTML.
-// Il vecchio endpoint Open Data /livello.json restituisce soltanto l'anagrafica delle stazioni.
-function htmlText(value) {
-  return String(value).replace(/<[^>]*>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '\"').replace(/&#39;|&apos;/gi, "'").replace(/\s+/g, ' ').trim();
-}
-function parseObservedTideHtml(html) {
-  const source = String(html);
-  const rows = [];
-  const addRow = (date, levelRaw, tempRaw) => {
-    const level = parseNumber(levelRaw);
-    if (!date || !Number.isFinite(level) || level <= -900) return;
-    const temp = parseNumber(tempRaw);
-    rows.push({ observedAtRaw: date.trim(), levelMeters: level, temperatureC: Number.isFinite(temp) ? temp : null });
-  };
-
-  // Primo tentativo: tabella HTML tradizionale.
-  for (const match of source.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
-    const cells = [...match[1].matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(m => htmlText(m[1]));
-    if (cells.length < 2) continue;
-    const date = cells.find(v => /^(?:\d{4}-\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4})\s+\d{2}:\d{2}(?::\d{2})?$/.test(v));
-    if (!date) continue;
-    const idx = cells.indexOf(date);
-    addRow(date, cells[idx + 1], cells[idx + 2]);
-  }
-
-  // Il server del Comune può servire le righe come testo tabellare delimitato da |,
-  // non come elementi <tr>. Supporta anche le righe con tag HTML inline.
-  if (!rows.length) {
-    const text = htmlText(source.replace(/<\/(?:tr|p|div|li|br|pre|td|th)>/gi, '\n').replace(/<br\s*\/?>/gi, '\n'));
-    const datePattern = /(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?|\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?)/g;
-    for (const line of text.split(/\n|(?<=\d{2})\s{2,}/)) {
-      const m = line.match(datePattern);
-      if (!m) continue;
-      const date = m[0];
-      const idx = line.indexOf(date) + date.length;
-      const tail = line.slice(idx).split('|').map(v => v.trim()).filter(Boolean);
-      if (tail.length >= 1) addRow(date, tail[0], tail[1]);
-    }
-    // Ultimo parser: righe complete data | livello | temperatura anche se HTML minificato.
-    if (!rows.length) {
-      const flat = source.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
-      const re = /(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)\s*(?:\|\s*|\t+| {1,})(-?\d+(?:[.,]\d+)?)\s*(?:\|\s*|\t+| {1,})(-?\d+(?:[.,]\d+)?)/g;
-      for (const m of flat.matchAll(re)) addRow(m[1], m[2], m[3]);
-    }
-  }
-
-  // Rimuove eventuali duplicati creati da markup che espone sia testo sia tabella.
-  const unique = [...new Map(rows.map(r => [`${r.observedAtRaw}|${r.levelMeters}`, r])).values()];
-  unique.sort((a,b) => String(a.observedAtRaw).localeCompare(String(b.observedAtRaw)));
-  if (!unique.length) {
-    const preview = htmlText(source).slice(0, 350);
-    throw new Error(`La pagina ufficiale non contiene righe di marea riconoscibili. Anteprima: ${preview}`);
-  }
-  return { latest: unique[unique.length - 1], rows: unique, rowCount: unique.length };
-}
-async function fetchObservedTide() {
-  const response = await fetch(TIDE_URLS.observed, {
-    headers: { 'User-Agent': 'AlilagunaPilot/1.0 (integrazione dati ufficiali Comune di Venezia)', 'Accept': 'text/html' },
-    signal: AbortSignal.timeout(12000)
-  });
-  if (!response.ok) throw new Error(`Fonte ufficiale marea HTTP ${response.status}`);
-  const html = await response.text();
-  if (!/<html|<table|<tr/i.test(html)) throw new Error('La fonte ufficiale non ha restituito una pagina HTML leggibile.');
-  return { ...parseObservedTideHtml(html), httpStatus: response.status, contentType: response.headers.get('content-type') };
 }
 // Il Comune pubblica l'orario come ora solare fissa UTC+1 tutto l'anno.
 // Convertiamo quel wall-clock in un istante assoluto, poi il frontend lo visualizza in Europe/Rome (CET/CEST).
@@ -241,61 +168,44 @@ function comuneTimestampToIso(value) {
   return null;
 }
 
-// Pagina diagnostica accessibile direttamente da browser, indipendente dalla UI React.
-app.get('/debug-marea', (_req, res) => {
-  res.set('Cache-Control', 'no-store');
-  res.type('html').send(`<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Debug marea · Alilaguna Pilot</title><style>body{font:16px system-ui,sans-serif;max-width:1000px;margin:24px auto;padding:0 16px;color:#18212f}h1{font-size:1.6rem}button{padding:10px 14px;border:0;border-radius:8px;background:#075985;color:white;font-size:1rem;cursor:pointer}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f1f5f9;border:1px solid #cbd5e1;padding:14px;border-radius:8px} .ok{color:#087443}.bad{color:#b42318}</style></head><body><h1>Diagnostica marea · Punta Salute</h1><p>Questa pagina interroga solo gli Open Data ufficiali configurati nel server. Non usa fonti alternative.</p><p><button onclick="run()">Riprova test</button></p><h2>1. Fonte ufficiale e parsing</h2><p id="status">Test in corso…</p><pre id="debug">Caricamento…</pre><h2>2. Risposta consumata dalla dashboard</h2><p id="status2">Test in corso…</p><pre id="tide">Caricamento…</pre><script>async function get(url){const r=await fetch(url,{cache:'no-store'});const t=await r.text();let d;try{d=JSON.parse(t)}catch{d={raw:t}}return {httpStatus:r.status,ok:r.ok,data:d}}async function run(){document.querySelector('#status').textContent='Test in corso…';document.querySelector('#status2').textContent='Test in corso…';try{const d=await get('/api/tide/debug');document.querySelector('#debug').textContent=JSON.stringify(d,null,2);document.querySelector('#status').textContent='HTTP '+d.httpStatus+' · '+(d.data.ok?'lettura riconosciuta':'problema rilevato');document.querySelector('#status').className=d.data.ok?'ok':'bad'}catch(e){document.querySelector('#debug').textContent=String(e);document.querySelector('#status').textContent='Errore chiamando la diagnostica';document.querySelector('#status').className='bad'}try{const d=await get('/api/tide');document.querySelector('#tide').textContent=JSON.stringify(d,null,2);document.querySelector('#status2').textContent='HTTP '+d.httpStatus+' · '+(d.ok?'marea disponibile':'marea non disponibile');document.querySelector('#status2').className=d.ok?'ok':'bad'}catch(e){document.querySelector('#tide').textContent=String(e);document.querySelector('#status2').textContent='Errore chiamando /api/tide';document.querySelector('#status2').className='bad'}}run();</script></body></html>`);
-});
-
-// Diagnostica esplicita della fonte osservata: mostra struttura e campi utili,
-// senza tentare fonti alternative né modificare i dati visualizzati.
-app.get('/api/tide/debug', async (_req,res) => {
-  const checkedAt = new Date().toISOString();
-  try {
-    const result = await fetchObservedTide();
-    return res.json({ ok:true, checkedAt, source:TIDE_URLS.observed, httpStatus:result.httpStatus, contentType:result.contentType,
-      station:'Punta Salute Canal Grande', rowCount:result.rowCount, latest:result.latest,
-      parsedMeters:result.latest.levelMeters, parsedObservedAt:comuneTimestampToIso(result.latest.observedAtRaw),
-      sampleRows:result.rows.slice(-3), note:'Dato osservato grezzo del Comune; non validato.' });
-  } catch (e) {
-    return res.status(502).json({ ok:false, checkedAt, source:TIDE_URLS.observed, error:e.message,
-      hint:'La fonte ufficiale potrebbe essere temporaneamente non disponibile o aver cambiato formato.' });
-  }
-});
-
 app.get('/api/tide', async (_req,res) => {
   try {
-    const result = await fetchObservedTide();
-    const latest = result.latest;
-    const observedAt = comuneTimestampToIso(latest.observedAtRaw);
-    res.set('Cache-Control', 'no-store');
-    res.json({ station:'Punta Salute Canal Grande', levelMeters:latest.levelMeters, levelCm:Math.round(latest.levelMeters*100),
-      observedAt, observedAtRaw:latest.observedAtRaw, temperatureC:latest.temperatureC,
-      retrievedAt:new Date().toISOString(), source:TIDE_URLS.observed, units:'m', reference:'ZMPS',
-      disclaimer:'Dato automatico grezzo del Comune; non validato. L’orario pubblicato dal Comune è in ora solare UTC+1.' });
+    const data = await fetchJson(TIDE_URLS.observed);
+    const row = findStationRow(data);
+    if (!row) throw new Error('Stazione Punta Salute Canal Grande non trovata nel JSON ufficiale');
+    const valueRaw = row.valore ?? row.value ?? row.livello;
+    const meters = parseNumber(valueRaw);
+    if (!Number.isFinite(meters) || meters <= -900) throw new Error('Valore di marea mancante/non valido');
+    const observedAtRaw = row.data || row.timestamp || row.datetime || null;
+    const observedAt = comuneTimestampToIso(observedAtRaw);
+    res.json({ station: row.stazione || 'Punta Salute Canal Grande', levelMeters: meters, levelCm: Math.round(meters*100), observedAt, observedAtRaw, retrievedAt: new Date().toISOString(), source: TIDE_URLS.observed, units: 'm', reference: 'ZMPS', disclaimer: 'Dato automatico grezzo del Comune; non validato. Verificare sempre la fonte ufficiale.' });
   } catch (e) {
-    res.status(502).json({ error:'Impossibile leggere la marea ufficiale in questo momento.', detail:e.message, source:TIDE_URLS.observed });
+    res.status(502).json({ error: 'Impossibile leggere la marea ufficiale in questo momento.', detail: e.message, source: TIDE_URLS.observed });
   }
 });
 app.get('/api/tide-forecast', async (_req,res) => {
+  // La pagina ACTV riprende in formato testuale gli estremali comunicati dal Centro Maree,
+  // cioè il messaggio sintetico della segreteria: ora, quota e direzione (up/down).
+  const source = 'https://actv.avmspa.it/it/content/acqua-alta-servizi-di-navigazione-previsti';
   try {
-    const data = await fetchJson(TIDE_URLS.forecast);
-    const rows = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : Array.isArray(data?.records) ? data.records : [];
-    const now = Date.now();
-    const peaks = rows.map(row => {
-      const rawAt = row.DATA_ESTREMALE ?? row.data_estremale ?? row.DATA ?? row.data ?? row.timestamp ?? row.datetime;
-      const at = comuneTimestampToIso(rawAt);
-      const rawLevel = row.VALORE ?? row.valore ?? row.value ?? row.livello;
-      const levelCm = parseNumber(rawLevel);
-      const typeRaw = String(row.TIPO_ESTREMALE ?? row.tipo_estremale ?? row.tipo ?? row.type ?? '').trim();
-      if (!at || !Number.isFinite(levelCm) || !typeRaw) return null;
-      const type = /max|mass/i.test(typeRaw) ? 'Massimo' : /min/i.test(typeRaw) ? 'Minimo' : typeRaw;
-      return { at, time: new Intl.DateTimeFormat('it-IT',{timeZone:'Europe/Rome',hour:'2-digit',minute:'2-digit'}).format(new Date(at)), type, levelCm: Math.round(levelCm) };
-    }).filter(p => p && new Date(p.at).getTime() > now).sort((a,b)=>new Date(a.at)-new Date(b.at)).slice(0,4);
-    if (!peaks.length) throw new Error('Il JSON ufficiale non contiene estremi futuri riconoscibili.');
-    res.json({ source:TIDE_URLS.forecast, retrievedAt:new Date().toISOString(), peaks, nextPeak:peaks[0], method:'Estremi futuri letti dagli Open Data ufficiali del Comune di Venezia.' });
+    const response = await fetch(source, { headers: { 'User-Agent': 'Mozilla/5.0 AlilagunaPilot/1.0' }, signal: AbortSignal.timeout(12000) });
+    if (!response.ok) throw new Error(`Pagina ACTV HTTP ${response.status}`);
+    const html = await response.text();
+    const plain = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ').replace(/&amp;/gi, '&').replace(/&ndash;|&#8211;/gi, '–').replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/\s+/g, ' ');
+    const issued = plain.match(/Previsione di marea effettuata alle ore\s+(\d{1,2}:\d{2})\s+del\s+(\d{1,2})\/(\d{1,2})\/(\d{4})/i);
+    const current = plain.match(/Livello attuale\s+(-?\d+(?:[.,]\d+)?)\s*cm/i);
+    const rx = /(?:^|\s)(\d{1,2}:\d{2})\s+(-?\d+(?:[.,]\d+)?)\s*cm\s+(up|down|crescente|calante)(?=\s|$)/gi;
+    const extrema = []; let m;
+    while ((m = rx.exec(plain)) !== null) extrema.push({ time: m[1], levelCm: Number(m[2].replace(',', '.')), trend: /up|crescente/i.test(m[3]) ? 'up' : 'down' });
+    let issuedAt = null;
+    if (issued) { const [, hhmm, dd, mm, yyyy] = issued; issuedAt = new Date(Number(yyyy), Number(mm)-1, Number(dd), Number(hhmm.split(':')[0]), Number(hhmm.split(':')[1])); }
+    const base = issuedAt || new Date();
+    const peaks = extrema.map(x => { const [h,mi] = x.time.split(':').map(Number); const at = new Date(base.getFullYear(), base.getMonth(), base.getDate(), h, mi); if (at <= base) at.setDate(at.getDate()+1); return { ...x, at: at.toISOString(), type: x.trend === 'up' ? 'Massimo' : 'Minimo' }; }).sort((a,b) => new Date(a.at)-new Date(b.at));
+    const nextPeak = peaks[0] || null;
+    if (!nextPeak) throw new Error('La pagina ACTV è stata raggiunta, ma non contiene estremali nel formato atteso');
+    res.json({ source, retrievedAt: new Date().toISOString(), issuedAt: issuedAt?.toISOString() || null, currentLevelCm: current ? Number(current[1].replace(',', '.')) : null, peaks, nextPeak, method: 'Estremali testuali pubblicati da ACTV sulla base delle previsioni del Centro Maree; orari interpretati nel fuso Europe/Rome.' });
   } catch (e) {
-    res.status(502).json({ error:'Previsione marea non disponibile dagli Open Data ufficiali.', detail:e.message, source:TIDE_URLS.forecast });
+    res.status(502).json({ error:'Previsione marea non disponibile.', detail:e.message, source });
   }
 });
 app.get('/api/checkpoints', (_req,res) => res.json(TIDE_CHECKPOINTS));
@@ -307,5 +217,4 @@ if (fs.existsSync(dist)) {
 } else {
   app.get('/', (_req,res) => res.type('text').send('Alilaguna Pilot API attiva. Avvia il frontend con npm run dev oppure esegui npm run build.'));
 }
-const server = app.listen(port, () => console.log(`Alilaguna Pilot in ascolto sulla porta ${port}`));
-
+app.listen(port, () => console.log(`Alilaguna Pilot in ascolto sulla porta ${port}`));
