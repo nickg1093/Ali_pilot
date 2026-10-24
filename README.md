@@ -37,31 +37,3 @@ Il backend recupera il dataset del Comune di Venezia. L'orario della fonte, pubb
 ## Stima ritardo
 
 Il ritardo è una stima ottenuta interpolando gli orari statici GTFS lungo la forma del percorso e confrontandoli con l'ora locale. Non è un'informazione ufficiale di esercizio; dipende dalla qualità del GPS e dall'associazione corretta della corsa.
-
-## Aggiornamenti interfaccia flotta e rail
-
-- La velocità è mostrata in km/h (conversione da m/s restituiti dal GPS).
-- La rail mostra l'orario programmato e una stima aggiornata tramite il ritardo stimato corrente; quando il GPS registra una sosta ravvicinata al pontile a velocità molto bassa, memorizza l'ora di rilevamento per la sessione corrente.
-- La prossima fermata considera il punto GTFS più vicino e la velocità GPS per segnalare una fermata quando il dispositivo è entro circa 35 m e sotto 3,2 km/h. I parametri sono euristiche da calibrare sul campo.
-- La pagina Flotta live include una mappa Leaflet con simboli selezionabili e una scheda dettagliata per ciascun dispositivo.
-- Le ore visualizzate nella rail sono orari locali Europe/Rome. Le stime non sostituiscono dati ufficiali di esercizio.
-
-## Aggiornamenti interfaccia flotta
-
-- Layout più compatto, ottimizzato per schermi mobili.
-- Nella flotta live non vengono mostrate coordinate, accuratezza GPS o percentuale di avanzamento.
-- La mappa disegna anche il tracciato GTFS associato a ogni dispositivo; cliccando sul mezzo o sul tracciato si apre il dettaglio.
-- Il dettaglio include la corsa e la successione delle fermate con orario programmato, orario stimato e anticipo/ritardo.
-- Le differenze di puntualità sono mostrate anche quando valgono un solo minuto.
-- Gli orari stimati del dettaglio flotta applicano la differenza attuale rispetto al GTFS a tutte le fermate della corsa: sono quindi stime indicative, non previsioni dinamiche validate per ogni singola fermata.
-
-
-## Installare su smartphone (PWA)
-
-Alilaguna Pilot è una web app installabile, non un APK Android o un pacchetto IPA per iOS. Non serve uno store: dopo il deploy su un indirizzo HTTPS, aprire il sito sul dispositivo.
-
-- **Android (Chrome):** usare il pulsante `Installa app` nell'intestazione se disponibile, oppure menu ⋮ → `Installa app` / `Aggiungi a schermata Home`.
-- **iPhone/iPad (Safari):** aprire l'indirizzo in Safari → `Condividi` → `Aggiungi alla schermata Home` → `Aggiungi`. Su iOS il pulsante di installazione del browser non è esposto come su Android, quindi sono mostrate istruzioni manuali.
-- **Desktop compatibili:** il browser può offrire l'icona di installazione nella barra degli indirizzi.
-
-Il progetto include manifest PWA, service worker generato da `vite-plugin-pwa`, icone PNG 192/512 e `apple-touch-icon`. La geolocalizzazione richiede HTTPS e permesso esplicito. Alcune funzioni, in particolare GPS continuo e trasmissione alla flotta, richiedono che l'app resti aperta e che il sistema operativo non sospenda il browser.
