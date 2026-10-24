@@ -322,41 +322,67 @@ function parseBetaObserved(html) {
   return null;
 }
 app.get('/api/tide', async (_req,res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  const retrievedAt = new Date();
+  const errors = [];
+
+  // 1) Fonte preferita: misure grezze della rete telemareografica del CPSM.
+  // Il feed ufficiale dovrebbe aggiornarsi ogni 5 minuti; non accettiamo timestamp vecchi.
+  try {
+    const data = await fetchJson(TIDE_URLS.observedFallback);
+    const row = findStationRow(data);
+    if (!row) throw new Error('Punta Salute Canal Grande non presente nel feed delle stazioni');
+    const meters = parseNumber(row.valore ?? row.value ?? row.livello);
+    if (!Number.isFinite(meters) || meters <= -900) throw new Error('Valore osservato non valido');
+    const observedAtRaw = row.data || row.timestamp || row.datetime || null;
+    const observedAt = comuneTimestampToIso(observedAtRaw);
+    const ageMinutes = observedAt ? Math.round((retrievedAt.getTime() - new Date(observedAt).getTime()) / 60000) : null;
+    if (ageMinutes == null || ageMinutes < -5 || ageMinutes > 20) {
+      throw new Error(`Feed stazioni non aggiornato: ultima misura ${observedAtRaw || 'senza orario'}`);
+    }
+    return res.json({
+      station: row.stazione || 'Punta Salute Canal Grande',
+      levelMeters: meters, levelCm: Math.round(meters * 100),
+      observedAt, observedAtRaw, retrievedAt: retrievedAt.toISOString(),
+      ageMinutes, stale: false, freshness: 'measured', trendTimestamp: observedAt,
+      warning: null, source: TIDE_URLS.observedFallback, units: 'm', reference: 'ZMPS',
+      disclaimer: 'Dato automatico grezzo del Comune; non validato. La fonte indica aggiornamenti ogni 5 minuti.'
+    });
+  } catch (e) {
+    errors.push(`feed stazioni: ${e.message}`);
+  }
+
+  // 2) Fallback: il Centro Maree BETA pubblica il campo marea.osservata,
+  // ma non sempre espone l'ora della misura. In tal caso usiamo l'ora di
+  // consultazione solo per campionare la tendenza, mai come ora della misura.
   try {
     const page = await fetchText(TIDE_URLS.observed);
     const observed = parseBetaObserved(page);
-    if (observed) {
-      const retrievedAt = new Date();
-      res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-      return res.json({
-        station: 'Punta Salute (Centro Maree BETA)', levelMeters: observed.cm / 100,
-        levelCm: Math.round(observed.cm), observedAt: null, observedAtRaw: null,
-        retrievedAt: retrievedAt.toISOString(), ageMinutes: null, stale: false,
-        freshness: 'unknown',
-        warning: 'Valore corrente letto dalla pagina ufficiale BETA. La pagina non espone qui l’orario della singola misurazione.',
-        source: TIDE_URLS.observed, units: 'cm', reference: 'ZMPS',
-        disclaimer: 'Dato pubblicato dal Centro Maree; verificare l’orario della rilevazione nella fonte ufficiale.'
-      });
+    if (!observed) {
+      if (/\[osservata\]\s*=>\s*(?:N\.D\.|null|—|-)/i.test(page) || /Livello attuale\s*:?\s*(?:<[^>]*>\s*)*N\.D\./i.test(page)) {
+        throw new Error('Il Centro Maree BETA indica livello osservato N.D.');
+      }
+      throw new Error('Campo marea.osservata non trovato nella pagina BETA');
     }
-    // Se il markup BETA cambia, usa il feed grezzo delle stazioni solo se contiene
-    // una misurazione recente. Non presenta mai un valore vecchio come attuale.
-    const data = await fetchJson(TIDE_URLS.observedFallback);
-    const row = findStationRow(data);
-    if (!row) throw new Error('La pagina BETA non espone il valore osservato e la stazione non è presente nel feed di fallback');
-    const meters = parseNumber(row.valore ?? row.value ?? row.livello);
-    if (!Number.isFinite(meters) || meters <= -900) throw new Error('Valore di marea mancante/non valido');
-    const observedAtRaw = row.data || row.timestamp || row.datetime || null;
-    const observedAt = comuneTimestampToIso(observedAtRaw);
-    const retrievedAt = new Date();
-    const ageMinutes = observedAt ? Math.round((retrievedAt.getTime() - new Date(observedAt).getTime()) / 60000) : null;
-    const stale = ageMinutes == null || ageMinutes < -5 || ageMinutes > 20;
-    if (stale) throw new Error(`Il feed stazioni è fermo o obsoleto (ultima misura: ${observedAtRaw || 'orario assente'}); la pagina BETA non ha restituito un valore osservato riconoscibile.`);
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    return res.json({ station: row.stazione || 'Punta Salute Canal Grande', levelMeters: meters, levelCm: Math.round(meters*100), observedAt, observedAtRaw, retrievedAt: retrievedAt.toISOString(), ageMinutes, stale: false, freshness:'measured', warning:null, source: TIDE_URLS.observedFallback, units: 'm', reference: 'ZMPS', disclaimer: 'Dato automatico grezzo del Comune; non validato.' });
+    return res.json({
+      station: 'Punta Salute (Centro Maree BETA)',
+      levelMeters: observed.cm / 100, levelCm: Math.round(observed.cm),
+      observedAt: null, observedAtRaw: null, retrievedAt: retrievedAt.toISOString(),
+      ageMinutes: null, stale: false, freshness: 'page-snapshot',
+      trendTimestamp: retrievedAt.toISOString(),
+      warning: 'Il Centro Maree BETA non espone l’orario della singola misura: l’orario mostrato è quello di consultazione della pagina.',
+      source: TIDE_URLS.observed, units: 'cm', reference: 'ZMPS',
+      disclaimer: 'Livello osservato pubblicato dal Centro Maree BETA; timestamp della singola misura non disponibile.'
+    });
   } catch (e) {
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.status(502).json({ error: 'Impossibile leggere il livello osservato dal Centro Maree.', detail: e.message, source: TIDE_URLS.observed });
+    errors.push(`pagina BETA: ${e.message}`);
   }
+
+  res.status(502).json({
+    error: 'Livello attuale di Punta Salute non disponibile: nessuna fonte ha restituito una misura utilizzabile.',
+    detail: errors.join(' | '), source: TIDE_URLS.observedFallback,
+    stationPage: TIDE_URLS.observed, retrievedAt: retrievedAt.toISOString()
+  });
 });
 app.get('/api/tide-forecast', async (_req,res) => {
   const source = TIDE_URLS.forecast;
