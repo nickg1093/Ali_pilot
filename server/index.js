@@ -175,6 +175,52 @@ function comuneTimestampToIso(value) {
   return null;
 }
 
+// Pagina diagnostica accessibile direttamente da browser, indipendente dalla UI React.
+app.get('/debug-marea', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.type('html').send(`<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Debug marea · Alilaguna Pilot</title><style>body{font:16px system-ui,sans-serif;max-width:1000px;margin:24px auto;padding:0 16px;color:#18212f}h1{font-size:1.6rem}button{padding:10px 14px;border:0;border-radius:8px;background:#075985;color:white;font-size:1rem;cursor:pointer}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f1f5f9;border:1px solid #cbd5e1;padding:14px;border-radius:8px} .ok{color:#087443}.bad{color:#b42318}</style></head><body><h1>Diagnostica marea · Punta Salute</h1><p>Questa pagina interroga solo gli Open Data ufficiali configurati nel server. Non usa fonti alternative.</p><p><button onclick="run()">Riprova test</button></p><h2>1. Fonte ufficiale e parsing</h2><p id="status">Test in corso…</p><pre id="debug">Caricamento…</pre><h2>2. Risposta consumata dalla dashboard</h2><p id="status2">Test in corso…</p><pre id="tide">Caricamento…</pre><script>async function get(url){const r=await fetch(url,{cache:'no-store'});const t=await r.text();let d;try{d=JSON.parse(t)}catch{d={raw:t}}return {httpStatus:r.status,ok:r.ok,data:d}}async function run(){document.querySelector('#status').textContent='Test in corso…';document.querySelector('#status2').textContent='Test in corso…';try{const d=await get('/api/tide/debug');document.querySelector('#debug').textContent=JSON.stringify(d,null,2);document.querySelector('#status').textContent='HTTP '+d.httpStatus+' · '+(d.data.ok?'lettura riconosciuta':'problema rilevato');document.querySelector('#status').className=d.data.ok?'ok':'bad'}catch(e){document.querySelector('#debug').textContent=String(e);document.querySelector('#status').textContent='Errore chiamando la diagnostica';document.querySelector('#status').className='bad'}try{const d=await get('/api/tide');document.querySelector('#tide').textContent=JSON.stringify(d,null,2);document.querySelector('#status2').textContent='HTTP '+d.httpStatus+' · '+(d.ok?'marea disponibile':'marea non disponibile');document.querySelector('#status2').className=d.ok?'ok':'bad'}catch(e){document.querySelector('#tide').textContent=String(e);document.querySelector('#status2').textContent='Errore chiamando /api/tide';document.querySelector('#status2').className='bad'}}run();</script></body></html>`);
+});
+
+// Diagnostica esplicita della fonte osservata: mostra struttura e campi utili,
+// senza tentare fonti alternative né modificare i dati visualizzati.
+app.get('/api/tide/debug', async (_req,res) => {
+  const checkedAt = new Date().toISOString();
+  try {
+    const response = await fetch(TIDE_URLS.observed, {
+      headers: { 'User-Agent': 'LagunaPilot/0.1 (Comune Venezia open data integration)', 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(10000)
+    });
+    const contentType = response.headers.get('content-type');
+    const body = await response.text();
+    let data;
+    try { data = JSON.parse(body); }
+    catch (e) {
+      return res.status(502).json({ ok:false, checkedAt, source:TIDE_URLS.observed, httpStatus:response.status, contentType, bodyStart:body.slice(0,500), error:'La risposta della fonte non è JSON valido: '+e.message });
+    }
+    const rows = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : Array.isArray(data?.records) ? data.records : [];
+    const row = findStationRow(data);
+    const valueKeys = ['valore','VALORE','value','livello','LIVELLO','level'];
+    const timeKeys = ['data','DATA','DATA_MISURA','DATA_OSSERVAZIONE','timestamp','datetime'];
+    const stationKeys = ['stazione','STAZIONE','station','nome','NOME','name','ID_stazione','ID_STAZIONE','id','station_id'];
+    const pick = (obj, keys) => Object.fromEntries(keys.filter(k => obj && Object.prototype.hasOwnProperty.call(obj,k)).map(k => [k,obj[k]]));
+    return res.json({
+      ok:response.ok && !!row && Number.isFinite(parseNumber(valueKeys.map(k=>row?.[k]).find(v=>v!==undefined&&v!==null))),
+      checkedAt, source:TIDE_URLS.observed, httpStatus:response.status, contentType,
+      topLevelType:Array.isArray(data)?'array':typeof data,
+      topLevelKeys:data && !Array.isArray(data) && typeof data==='object'?Object.keys(data):[],
+      rowCount:rows.length, firstRowKeys:rows[0] && typeof rows[0]==='object'?Object.keys(rows[0]):[],
+      stationFound:!!row, stationFields:row?pick(row,stationKeys):null,
+      valueFields:row?pick(row,valueKeys):null, timestampFields:row?pick(row,timeKeys):null,
+      parsedMeters:row?parseNumber(valueKeys.map(k=>row?.[k]).find(v=>v!==undefined&&v!==null)):null,
+      parsedObservedAt:row?comuneTimestampToIso(timeKeys.map(k=>row?.[k]).find(v=>v!==undefined&&v!==null)):null,
+      sampleRows:rows.slice(0,3),
+      error:!response.ok?`La fonte ha risposto HTTP ${response.status}`:!row?'Nessuna riga riconosciuta per Punta Salute / ID 1025':undefined
+    });
+  } catch (e) {
+    return res.status(502).json({ ok:false, checkedAt, source:TIDE_URLS.observed, error:e.message, hint:'Controllare rete in uscita, DNS e timeout del server.' });
+  }
+});
+
 app.get('/api/tide', async (_req,res) => {
   try {
     const data = await fetchJson(TIDE_URLS.observed);
