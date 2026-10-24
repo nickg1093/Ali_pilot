@@ -48,10 +48,59 @@ function tripStops(tripId) {
   });
 }
 
-// Posizioni condivise fra i dispositivi collegati alla stessa istanza del server.
-// In memoria per il prototipo: per disponibilità persistente/multiistanza usare Redis o PostgreSQL.
+// Archivio realtime su file JSON: leggibile anche fuori dal processo server.
+// Su Render il filesystem è persistente solo se REALTIME_DATA_DIR punta a un disco persistente.
+const realtimeDir = path.resolve(process.env.REALTIME_DATA_DIR || path.join(root, 'data', 'realtime'));
+const vehiclePositionsFile = path.join(realtimeDir, 'vehicle-positions.json');
+const tripUpdatesFile = path.join(realtimeDir, 'trip-updates.json');
+const vehiclePositionsPbFile = path.join(realtimeDir, 'vehicle-positions.pb');
+const tripUpdatesPbFile = path.join(realtimeDir, 'trip-updates.pb');
 const livePositions = new Map();
 const STALE_AFTER_MS = 120_000;
+let persistQueue = Promise.resolve();
+function writeJsonAtomic(file, value) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  fs.renameSync(tmp, file);
+}
+function persistRealtimeFiles() {
+  persistQueue = persistQueue.then(() => {
+    fs.mkdirSync(realtimeDir, { recursive: true });
+    const now = Date.now();
+    const vehicles = [...livePositions.values()].sort((a,b) => b.receivedAt-a.receivedAt);
+    const header = { generatedAt: new Date(now).toISOString(), format: 'Alilaguna Pilot GTFS-RT JSON mirror', staleAfterSeconds: STALE_AFTER_MS/1000 };
+    writeJsonAtomic(vehiclePositionsFile, { header, vehicles });
+    const tripUpdates = vehicles.filter(p => now-p.receivedAt <= STALE_AFTER_MS).map(p => ({
+      tripId:p.tripId, routeId:p.routeId, vehicleId:p.deviceId,
+      timestamp:Math.floor((p.timestamp || p.receivedAt || now)/1000),
+      delaySeconds:p.delaySeconds, stopId:p.nextStopId || null, stopName:p.nextStopName || null, source:'phone-gps'
+    }));
+    writeJsonAtomic(tripUpdatesFile, { header, tripUpdates });
+    const protobuf = GtfsRealtimeBindings.transit_realtime;
+    const feedHeader = { gtfsRealtimeVersion:'2.0', incrementality:0, timestamp:Math.floor(now/1000) };
+    const vehicleEntities = vehicles.filter(p => now-p.receivedAt <= STALE_AFTER_MS).map(p => ({
+      id:p.deviceId, vehicle:{ trip:{tripId:p.tripId,routeId:p.routeId}, vehicle:{id:p.deviceId,label:p.boatName},
+        position:{latitude:p.lat,longitude:p.lon,...(p.bearing!==null?{bearing:p.bearing}:{}),...(p.speedMps!==null?{speed:p.speedMps}:{})},
+        timestamp:Math.floor((p.timestamp||now)/1000), currentStatus:2, ...(p.nextStopId?{stopId:p.nextStopId}:{}) }
+    }));
+    const vpBytes = protobuf.FeedMessage.encode({header:feedHeader,entity:vehicleEntities}).finish();
+    const tuEntities = vehicles.filter(p => now-p.receivedAt <= STALE_AFTER_MS).map(p => ({
+      id:`trip:${p.tripId}:${p.deviceId}`, tripUpdate:{trip:{tripId:p.tripId,routeId:p.routeId},timestamp:Math.floor((p.timestamp||now)/1000),
+        ...(p.nextStopId?{stopTimeUpdate:[{stopId:p.nextStopId,arrival:p.delaySeconds!==null&&p.delaySeconds!==undefined?{delay:p.delaySeconds}:{},departure:p.delaySeconds!==null&&p.delaySeconds!==undefined?{delay:p.delaySeconds}:{}}]}:{})}
+    }));
+    const tuBytes = protobuf.FeedMessage.encode({header:feedHeader,entity:tuEntities}).finish();
+    const writeBufferAtomic = (file, buffer) => { const tmp=`${file}.${process.pid}.tmp`; fs.writeFileSync(tmp,Buffer.from(buffer)); fs.renameSync(tmp,file); };
+    writeBufferAtomic(vehiclePositionsPbFile, vpBytes);
+    writeBufferAtomic(tripUpdatesPbFile, tuBytes);
+  }).catch(error => console.error('Salvataggio realtime fallito:', error.message));
+  return persistQueue;
+}
+try {
+  const stored = JSON.parse(fs.readFileSync(vehiclePositionsFile, 'utf8'));
+  for (const p of (Array.isArray(stored.vehicles) ? stored.vehicles : [])) {
+    if (p?.deviceId && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lon))) livePositions.set(String(p.deviceId), p);
+  }
+} catch (error) { if (error.code !== 'ENOENT') console.warn('Archivio realtime non leggibile:', error.message); }
 app.post('/api/positions', (req, res) => {
   const b = req.body || {};
   const required = ['deviceId','tripId','routeId','boatId','lat','lon'];
@@ -75,6 +124,7 @@ app.post('/api/positions', (req, res) => {
   // Scarta update più vecchi rispetto alla posizione già memorizzata.
   if (prev && item.timestamp < prev.timestamp) return res.status(409).json({ error: 'Aggiornamento GPS più vecchio di quello già ricevuto.' });
   livePositions.set(item.deviceId, item);
+  persistRealtimeFiles();
   res.json({ ok: true, activeDevices: [...livePositions.values()].filter(x => now - x.receivedAt <= STALE_AFTER_MS).length });
 });
 app.get('/api/positions', (_req,res) => {
@@ -146,6 +196,25 @@ app.get('/api/gtfs-rt/vehicle-positions.json', (_req,res) => {
   const now = Date.now();
   res.json({ header:{gtfsRealtimeVersion:'2.0',timestamp:Math.floor(now/1000)}, vehicles:[...livePositions.values()].filter(p=>now-p.receivedAt<=STALE_AFTER_MS) });
 });
+app.get('/api/gtfs-rt/trip-updates.json', (_req,res) => {
+  res.set('Cache-Control','no-store');
+  try { res.type('json').send(fs.readFileSync(tripUpdatesFile, 'utf8')); }
+  catch { res.json({ header:{generatedAt:null}, tripUpdates:[] }); }
+});
+app.get('/api/gtfs-rt/trip-updates.pb', (_req,res) => {
+  res.set('Content-Type','application/x-protobuf'); res.set('Cache-Control','no-store');
+  try { res.send(fs.readFileSync(tripUpdatesPbFile)); } catch { const feed=GtfsRealtimeBindings.transit_realtime.FeedMessage.encode({header:{gtfsRealtimeVersion:'2.0',incrementality:0,timestamp:Math.floor(Date.now()/1000)},entity:[]}).finish(); res.send(Buffer.from(feed)); }
+});
+app.get('/api/gtfs-rt/files', (_req,res) => res.json({
+  directory:path.relative(root, realtimeDir),
+  files:[
+    {name:'vehicle-positions.json',url:'/api/gtfs-rt/vehicle-positions.json',path:path.relative(root,vehiclePositionsFile)},
+    {name:'trip-updates.json',url:'/api/gtfs-rt/trip-updates.json',path:path.relative(root,tripUpdatesFile)},
+    {name:'vehicle-positions.pb',url:'/api/gtfs-rt/vehicle-positions.pb',path:path.relative(root,vehiclePositionsPbFile)},
+    {name:'trip-updates.pb',url:'/api/gtfs-rt/trip-updates.pb',path:path.relative(root,tripUpdatesPbFile)}
+  ],
+  persistence:process.env.REALTIME_DATA_DIR ? 'REALTIME_DATA_DIR configurata; verificare che punti a disco persistente' : 'filesystem locale del progetto; su Render free i file possono essere persi ai riavvii'
+}));
 
 app.get('/api/health', (_req,res) => res.json({ ok: true, app: 'alilaguna-pilot', gtfsLoaded: gtfs.trips.length > 0 }));
 app.get('/api/boats', (_req,res) => res.json(BOATS));
@@ -275,4 +344,5 @@ if (fs.existsSync(dist)) {
 } else {
   app.get('/', (_req,res) => res.type('text').send('Alilaguna Pilot API attiva. Avvia il frontend con npm run dev oppure esegui npm run build.'));
 }
-app.listen(port, () => console.log(`Alilaguna Pilot in ascolto sulla porta ${port}`));
+const server = app.listen(port, () => console.log(`Alilaguna Pilot in ascolto sulla porta ${port}`));
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { server.close(async () => { await persistRealtimeFiles(); process.exit(0); }); });
