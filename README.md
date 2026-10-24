@@ -1,35 +1,67 @@
 # Alilaguna Pilot
 
-Dashboard PWA per il personale in servizio: turno/corsa, fermate e orari GTFS, marea osservata e previsione ufficiale, più visualizzazione live della flotta.
+PWA sperimentale per selezione corsa, navigazione GPS, rail delle fermate, marea di Punta Salute e condivisione delle posizioni GPS fra dispositivi collegati alla stessa istanza server.
 
-## Avvio
+## Avvio locale
 
+- Node.js 20 o successivo consigliato.
 - `npm install`
 - `npm run dev` per sviluppo
-- `npm run build` e `npm start` per esecuzione server con frontend compilato
+- `npm run build` e `npm start` per avvio produzione
 
-## Fonti marea — solo Open Data ufficiali
+## Render
 
-Configurate in `server/config.js`:
-- Osservata: `https://dati.venezia.it/sites/default/files/dataset/opendata/livello.json`
-- Previsione: `https://dati.venezia.it/sites/default/files/dataset/opendata/previsione.json`
+Il repository include `render.yaml`. Come alternativa, configurare Build Command `npm install && npm run build` e Start Command `npm start`. Il GPS richiede HTTPS e il consenso del browser.
 
-Il backend non cerca fonti alternative. Se il JSON ufficiale non è disponibile o non contiene campi riconoscibili, l'API segnala l'errore senza ripiegare su altre pagine o endpoint.
+## GTFS Realtime
 
-## Flotta live
+- `GET /api/gtfs-rt/vehicle-positions.pb`: feed GTFS Realtime protobuf VehiclePositions.
+- `GET /api/gtfs-rt/vehicle-positions.json`: rappresentazione JSON di debug.
+- `GET /api/positions`: posizioni recenti per la dashboard flotta.
+- `POST /api/positions`: riceve aggiornamenti GPS da ogni dispositivo.
 
-Il dispositivo in servizio invia la posizione a `POST /api/positions`; la dashboard legge `GET /api/positions`. Le posizioni sono mantenute soltanto nella memoria del processo server e si perdono al riavvio. Non vengono creati file per le posizioni live e nessun file aggiuntivo. I file GTFS statici in `data/gtfs/` restano usati per orari, fermate, percorsi e simulazione visuale delle corse quando non è disponibile un GPS reale.
+Il feed protobuf è generato al volo dal backend e non va committato come file statico. Il dispositivo invia aggiornamenti ogni circa 4 secondi mentre il GPS è attivo. Le posizioni più vecchie di 2 minuti sono escluse dal feed GTFS-RT.
 
-## API principali
+## Limite del prototipo multi-dispositivo
 
-- `GET /api/tide`
-- `GET /api/tide-forecast`
-- `GET /api/positions`
-- `POST /api/positions`
-- `GET /api/scheduled-vehicles`
-- `GET /api/routes`, `GET /api/trips`, `GET /api/boats`
+Le posizioni sono conservate in memoria nel processo Node. Sono quindi condivise dai dispositivi che raggiungono la stessa istanza, ma si perdono al riavvio e non sono condivise tra più istanze Render. Per uso continuativo occorre collegare Redis o PostgreSQL e proteggere gli endpoint con autenticazione/token per dispositivo.
+
+## Personalizzare barche e soglie
+
+Modificare `server/config.js`. I dati dimostrativi sono segnaposto e non devono essere usati per decisioni di navigazione reali.
+
+## Marea
+
+Il backend recupera il dataset del Comune di Venezia. L'orario della fonte, pubblicato in ora solare fissa UTC+1, viene convertito in un istante e mostrato in `Europe/Rome`, con gestione automatica CET/CEST. Il dato può essere grezzo/non validato: verificare sempre la fonte ufficiale.
+
+## Stima ritardo
+
+Il ritardo è una stima ottenuta interpolando gli orari statici GTFS lungo la forma del percorso e confrontandoli con l'ora locale. Non è un'informazione ufficiale di esercizio; dipende dalla qualità del GPS e dall'associazione corretta della corsa.
+
+## Aggiornamenti interfaccia flotta e rail
+
+- La velocità è mostrata in km/h (conversione da m/s restituiti dal GPS).
+- La rail mostra l'orario programmato e una stima aggiornata tramite il ritardo stimato corrente; quando il GPS registra una sosta ravvicinata al pontile a velocità molto bassa, memorizza l'ora di rilevamento per la sessione corrente.
+- La prossima fermata considera il punto GTFS più vicino e la velocità GPS per segnalare una fermata quando il dispositivo è entro circa 35 m e sotto 3,2 km/h. I parametri sono euristiche da calibrare sul campo.
+- La pagina Flotta live include una mappa Leaflet con simboli selezionabili e una scheda dettagliata per ciascun dispositivo.
+- Le ore visualizzate nella rail sono orari locali Europe/Rome. Le stime non sostituiscono dati ufficiali di esercizio.
+
+## Aggiornamenti interfaccia flotta
+
+- Layout più compatto, ottimizzato per schermi mobili.
+- Nella flotta live non vengono mostrate coordinate, accuratezza GPS o percentuale di avanzamento.
+- La mappa disegna anche il tracciato GTFS associato a ogni dispositivo; cliccando sul mezzo o sul tracciato si apre il dettaglio.
+- Il dettaglio include la corsa e la successione delle fermate con orario programmato, orario stimato e anticipo/ritardo.
+- Le differenze di puntualità sono mostrate anche quando valgono un solo minuto.
+- Gli orari stimati del dettaglio flotta applicano la differenza attuale rispetto al GTFS a tutte le fermate della corsa: sono quindi stime indicative, non previsioni dinamiche validate per ogni singola fermata.
 
 
-## Integrazione marea ufficiale
+## Installare su smartphone (PWA)
 
-La misura osservata di Punta Salute viene letta dalla pagina ufficiale del Comune di Venezia (`https://www.comune.venezia.it/sites/default/files/publicCPSM2/stazioni/temporeale/Punta_Salute.html`), che pubblica righe con data/ora, livello idrometrico medio in metri e temperatura dell'acqua. Il file Open Data `livello.json` è invece l'anagrafica delle stazioni e non contiene la misura. Endpoint di verifica: `/api/tide/debug`; endpoint dashboard: `/api/tide`. I dati sono grezzi e non validati dal Centro Maree.
+Alilaguna Pilot è una web app installabile, non un APK Android o un pacchetto IPA per iOS. Non serve uno store: dopo il deploy su un indirizzo HTTPS, aprire il sito sul dispositivo.
+
+- **Android (Chrome):** usare il pulsante `Installa app` nell'intestazione se disponibile, oppure menu ⋮ → `Installa app` / `Aggiungi a schermata Home`.
+- **iPhone/iPad (Safari):** aprire l'indirizzo in Safari → `Condividi` → `Aggiungi alla schermata Home` → `Aggiungi`. Su iOS il pulsante di installazione del browser non è esposto come su Android, quindi sono mostrate istruzioni manuali.
+- **Desktop compatibili:** il browser può offrire l'icona di installazione nella barra degli indirizzi.
+
+Il progetto include manifest PWA, service worker generato da `vite-plugin-pwa`, icone PNG 192/512 e `apple-touch-icon`. La geolocalizzazione richiede HTTPS e permesso esplicito. Alcune funzioni, in particolare GPS continuo e trasmissione alla flotta, richiedono che l'app resti aperta e che il sistema operativo non sospenda il browser.
