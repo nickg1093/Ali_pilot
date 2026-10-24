@@ -28,3 +28,8 @@ Il dispositivo in servizio invia la posizione a `POST /api/positions`; la dashbo
 - `POST /api/positions`
 - `GET /api/scheduled-vehicles`
 - `GET /api/routes`, `GET /api/trips`, `GET /api/boats`
+
+
+## Integrazione marea ufficiale
+
+La misura osservata di Punta Salute viene letta dalla pagina ufficiale del Comune di Venezia (`https://www.comune.venezia.it/sites/default/files/publicCPSM2/stazioni/temporeale/Punta_Salute.html`), che pubblica righe con data/ora, livello idrometrico medio in metri e temperatura dell'acqua. Il file Open Data `livello.json` è invece l'anagrafica delle stazioni e non contiene la misura. Endpoint di verifica: `/api/tide/debug`; endpoint dashboard: `/api/tide`. I dati sono grezzi e non validati dal Centro Maree.
