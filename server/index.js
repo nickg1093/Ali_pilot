@@ -79,19 +79,7 @@ app.post('/api/positions', (req, res) => {
 });
 app.get('/api/positions', (_req,res) => {
   const now = Date.now();
-  // Arricchisce le posizioni con il percorso GTFS e gli orari della corsa,
-  // così la flotta live può mostrare tracciato e rail senza richieste extra.
-  res.json([...livePositions.values()].map(p => {
-    const gtfsTrip = gtfs.trips.find(t => t.trip_id === p.tripId);
-    const route = routeById.get(p.routeId) || {};
-    return {
-      ...p,
-      stale: now-p.receivedAt > STALE_AFTER_MS,
-      routeColor: route.route_color || null,
-      stops: tripStops(p.tripId),
-      shape: gtfsTrip ? (shapeGroups.get(gtfsTrip.shape_id) || []) : []
-    };
-  }).sort((a,b)=>b.receivedAt-a.receivedAt));
+  res.json([...livePositions.values()].map(p => ({ ...p, stale: now-p.receivedAt > STALE_AFTER_MS })).sort((a,b)=>b.receivedAt-a.receivedAt));
 });
 app.get('/api/gtfs-rt/vehicle-positions.pb', (_req,res) => {
   const now = Date.now();
@@ -184,29 +172,10 @@ app.get('/api/tide', async (_req,res) => {
   }
 });
 app.get('/api/tide-forecast', async (_req,res) => {
-  // La pagina ACTV riprende in formato testuale gli estremali comunicati dal Centro Maree,
-  // cioè il messaggio sintetico della segreteria: ora, quota e direzione (up/down).
-  const source = 'https://actv.avmspa.it/it/content/acqua-alta-servizi-di-navigazione-previsti';
   try {
-    const response = await fetch(source, { headers: { 'User-Agent': 'Mozilla/5.0 AlilagunaPilot/1.0' }, signal: AbortSignal.timeout(12000) });
-    if (!response.ok) throw new Error(`Pagina ACTV HTTP ${response.status}`);
-    const html = await response.text();
-    const plain = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ').replace(/&amp;/gi, '&').replace(/&ndash;|&#8211;/gi, '–').replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/\s+/g, ' ');
-    const issued = plain.match(/Previsione di marea effettuata alle ore\s+(\d{1,2}:\d{2})\s+del\s+(\d{1,2})\/(\d{1,2})\/(\d{4})/i);
-    const current = plain.match(/Livello attuale\s+(-?\d+(?:[.,]\d+)?)\s*cm/i);
-    const rx = /(?:^|\s)(\d{1,2}:\d{2})\s+(-?\d+(?:[.,]\d+)?)\s*cm\s+(up|down|crescente|calante)(?=\s|$)/gi;
-    const extrema = []; let m;
-    while ((m = rx.exec(plain)) !== null) extrema.push({ time: m[1], levelCm: Number(m[2].replace(',', '.')), trend: /up|crescente/i.test(m[3]) ? 'up' : 'down' });
-    let issuedAt = null;
-    if (issued) { const [, hhmm, dd, mm, yyyy] = issued; issuedAt = new Date(Number(yyyy), Number(mm)-1, Number(dd), Number(hhmm.split(':')[0]), Number(hhmm.split(':')[1])); }
-    const base = issuedAt || new Date();
-    const peaks = extrema.map(x => { const [h,mi] = x.time.split(':').map(Number); const at = new Date(base.getFullYear(), base.getMonth(), base.getDate(), h, mi); if (at <= base) at.setDate(at.getDate()+1); return { ...x, at: at.toISOString(), type: x.trend === 'up' ? 'Massimo' : 'Minimo' }; }).sort((a,b) => new Date(a.at)-new Date(b.at));
-    const nextPeak = peaks[0] || null;
-    if (!nextPeak) throw new Error('La pagina ACTV è stata raggiunta, ma non contiene estremali nel formato atteso');
-    res.json({ source, retrievedAt: new Date().toISOString(), issuedAt: issuedAt?.toISOString() || null, currentLevelCm: current ? Number(current[1].replace(',', '.')) : null, peaks, nextPeak, method: 'Estremali testuali pubblicati da ACTV sulla base delle previsioni del Centro Maree; orari interpretati nel fuso Europe/Rome.' });
-  } catch (e) {
-    res.status(502).json({ error:'Previsione marea non disponibile.', detail:e.message, source });
-  }
+    const data = await fetchJson(TIDE_URLS.forecast);
+    res.json({ source: TIDE_URLS.forecast, retrievedAt: new Date().toISOString(), raw: data, note: 'Formato previsione restituito dalla fonte ufficiale. Verificare la struttura del JSON prima di usarlo per decisioni operative.' });
+  } catch (e) { res.status(502).json({ error:'Previsione marea non disponibile.', detail:e.message, source:TIDE_URLS.forecast }); }
 });
 app.get('/api/checkpoints', (_req,res) => res.json(TIDE_CHECKPOINTS));
 
