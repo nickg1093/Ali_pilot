@@ -65,3 +65,16 @@ Alilaguna Pilot è una web app installabile, non un APK Android o un pacchetto I
 - **Desktop compatibili:** il browser può offrire l'icona di installazione nella barra degli indirizzi.
 
 Il progetto include manifest PWA, service worker generato da `vite-plugin-pwa`, icone PNG 192/512 e `apple-touch-icon`. La geolocalizzazione richiede HTTPS e permesso esplicito. Alcune funzioni, in particolare GPS continuo e trasmissione alla flotta, richiedono che l'app resti aperta e che il sistema operativo non sospenda il browser.
+
+## Archivio GTFS-Realtime
+
+Il backend salva automaticamente le posizioni GPS ricevute e gli aggiornamenti corsa in `data/realtime/` (o nella directory indicata da `REALTIME_DATA_DIR`):
+
+- `vehicle-positions.json`: posizioni leggibili in JSON;
+- `trip-updates.json`: aggiornamenti leggibili in JSON;
+- `vehicle-positions.pb`: feed GTFS-Realtime protobuf VehiclePositions;
+- `trip-updates.pb`: feed GTFS-Realtime protobuf TripUpdates.
+
+Endpoint HTTP: `/api/gtfs-rt/vehicle-positions.json`, `/api/gtfs-rt/trip-updates.json`, `/api/gtfs-rt/vehicle-positions.pb`, `/api/gtfs-rt/trip-updates.pb` e `/api/gtfs-rt/files`.
+
+**Persistenza Render:** sul piano gratuito il filesystem del servizio può essere effimero e i file possono sparire al riavvio o al nuovo deploy. Per conservarli nel tempo, configurare `REALTIME_DATA_DIR` verso un disco persistente montato sul servizio (se disponibile nel piano Render) oppure migrare l'archivio a un database/oggetto storage persistente. I file contengono posizioni GPS: non renderli pubblici se non autorizzato.
