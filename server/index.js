@@ -155,20 +155,54 @@ function htmlText(value) {
   return String(value).replace(/<[^>]*>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '\"').replace(/&#39;|&apos;/gi, "'").replace(/\s+/g, ' ').trim();
 }
 function parseObservedTideHtml(html) {
+  const source = String(html);
   const rows = [];
-  for (const match of String(html).matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
+  const addRow = (date, levelRaw, tempRaw) => {
+    const level = parseNumber(levelRaw);
+    if (!date || !Number.isFinite(level) || level <= -900) return;
+    const temp = parseNumber(tempRaw);
+    rows.push({ observedAtRaw: date.trim(), levelMeters: level, temperatureC: Number.isFinite(temp) ? temp : null });
+  };
+
+  // Primo tentativo: tabella HTML tradizionale.
+  for (const match of source.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
     const cells = [...match[1].matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(m => htmlText(m[1]));
     if (cells.length < 2) continue;
-    const date = cells.find(v => /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?$/.test(v));
+    const date = cells.find(v => /^(?:\d{4}-\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4})\s+\d{2}:\d{2}(?::\d{2})?$/.test(v));
     if (!date) continue;
     const idx = cells.indexOf(date);
-    const level = parseNumber(cells[idx + 1]);
-    if (!Number.isFinite(level) || level <= -900) continue;
-    rows.push({ observedAtRaw: date, levelMeters: level, temperatureC: Number.isFinite(parseNumber(cells[idx + 2])) ? parseNumber(cells[idx + 2]) : null });
+    addRow(date, cells[idx + 1], cells[idx + 2]);
   }
-  rows.sort((a,b) => String(a.observedAtRaw).localeCompare(String(b.observedAtRaw)));
-  if (!rows.length) throw new Error('La pagina ufficiale non contiene righe di marea riconoscibili.');
-  return { latest: rows[rows.length - 1], rows, rowCount: rows.length };
+
+  // Il server del Comune può servire le righe come testo tabellare delimitato da |,
+  // non come elementi <tr>. Supporta anche le righe con tag HTML inline.
+  if (!rows.length) {
+    const text = htmlText(source.replace(/<\/(?:tr|p|div|li|br|pre|td|th)>/gi, '\n').replace(/<br\s*\/?>/gi, '\n'));
+    const datePattern = /(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?|\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?)/g;
+    for (const line of text.split(/\n|(?<=\d{2})\s{2,}/)) {
+      const m = line.match(datePattern);
+      if (!m) continue;
+      const date = m[0];
+      const idx = line.indexOf(date) + date.length;
+      const tail = line.slice(idx).split('|').map(v => v.trim()).filter(Boolean);
+      if (tail.length >= 1) addRow(date, tail[0], tail[1]);
+    }
+    // Ultimo parser: righe complete data | livello | temperatura anche se HTML minificato.
+    if (!rows.length) {
+      const flat = source.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+      const re = /(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)\s*(?:\|\s*|\t+| {1,})(-?\d+(?:[.,]\d+)?)\s*(?:\|\s*|\t+| {1,})(-?\d+(?:[.,]\d+)?)/g;
+      for (const m of flat.matchAll(re)) addRow(m[1], m[2], m[3]);
+    }
+  }
+
+  // Rimuove eventuali duplicati creati da markup che espone sia testo sia tabella.
+  const unique = [...new Map(rows.map(r => [`${r.observedAtRaw}|${r.levelMeters}`, r])).values()];
+  unique.sort((a,b) => String(a.observedAtRaw).localeCompare(String(b.observedAtRaw)));
+  if (!unique.length) {
+    const preview = htmlText(source).slice(0, 350);
+    throw new Error(`La pagina ufficiale non contiene righe di marea riconoscibili. Anteprima: ${preview}`);
+  }
+  return { latest: unique[unique.length - 1], rows: unique, rowCount: unique.length };
 }
 async function fetchObservedTide() {
   const response = await fetch(TIDE_URLS.observed, {
